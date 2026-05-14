@@ -25,10 +25,20 @@ class UserSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'email', 'username', 'is_premium', 'premium_until', 'stats']
 
     def get_is_premium(self, obj):
-        return False
+        from services.stripe_service import get_subscription_status
+        try:
+            result = get_subscription_status(str(obj.id))
+            return result['is_premium']
+        except Exception:
+            return False
 
     def get_premium_until(self, obj):
-        return None
+        from services.stripe_service import get_subscription_status
+        try:
+            result = get_subscription_status(str(obj.id))
+            return result['premium_until']
+        except Exception:
+            return None
 
     def get_stats(self, obj):
         user_id = str(obj.id)
