@@ -25,4 +25,5 @@ urlpatterns = [
     path('api/', include('accounts.urls')),
     path('api/', include('music.urls')),
     path('api/', include('playlists.urls')),
+    path('api/', include('recommendations.urls')),
 ]
