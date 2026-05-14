@@ -1,3 +1,4 @@
+from django.db import connection
 from rest_framework import serializers
 
 from .models import User, UserCredential
@@ -30,10 +31,18 @@ class UserSerializer(serializers.ModelSerializer):
         return None
 
     def get_stats(self, obj):
+        user_id = str(obj.id)
+        with connection.cursor() as cursor:
+            cursor.execute('SELECT COUNT(*) FROM play_history WHERE user_id = %s', [user_id])
+            listened = cursor.fetchone()[0]
+            cursor.execute('SELECT COUNT(*) FROM liked_songs WHERE user_id = %s', [user_id])
+            favorites = cursor.fetchone()[0]
+            cursor.execute('SELECT COUNT(*) FROM playlists')
+            playlists = cursor.fetchone()[0]
         return {
-            'listened_count': 0,
-            'favorites_count': 0,
-            'playlists_count': 0,
+            'listened_count': listened,
+            'favorites_count': favorites,
+            'playlists_count': playlists,
         }
 
 

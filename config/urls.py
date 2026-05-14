@@ -23,4 +23,6 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/health/', HealthCheckView.as_view(), name='health-check'),
     path('api/', include('accounts.urls')),
+    path('api/', include('music.urls')),
+    path('api/', include('playlists.urls')),
 ]

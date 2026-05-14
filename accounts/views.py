@@ -1,7 +1,11 @@
+import base64
+
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+
 
 from .authentication import verify_supabase_jwt
 from .models import User, UserSession
@@ -90,3 +94,29 @@ class CurrentUserView(APIView):
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response(serializer.data)
+
+
+class AvatarUploadView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        avatar = request.FILES.get('avatar')
+        if not avatar:
+            return Response({'detail': 'No avatar file provided'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if avatar.size > 5 * 1024 * 1024:
+            return Response({'detail': 'File too large (max 5MB)'}, status=status.HTTP_400_BAD_REQUEST)
+
+        valid_types = ['image/jpeg', 'image/png', 'image/webp']
+        if avatar.content_type not in valid_types:
+            return Response({'detail': 'Invalid file type (JPEG, PNG, WebP only)'}, status=status.HTTP_400_BAD_REQUEST)
+
+        ext = 'png' if avatar.content_type == 'image/png' else ('webp' if avatar.content_type == 'image/webp' else 'jpeg')
+        encoded = base64.b64encode(avatar.read()).decode('utf-8')
+        data_url = f'data:{avatar.content_type};base64,{encoded}'
+
+        user = request.user
+        user.avatar_url = data_url
+        user.save(update_fields=['avatar_url'])
+
+        return Response({'avatar_url': data_url})
