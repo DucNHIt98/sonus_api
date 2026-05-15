@@ -102,9 +102,9 @@ class PlaylistDetailView(APIView):
             total_songs = cursor.fetchone()[0]
 
             cursor.execute(
-                'SELECT s.id, s.title, s.subtitle, s.image_url, s.audio_url, s.duration, s.source, ps.added_at '
+                'SELECT s.id, s.title, s.subtitle, s.image_url, s.audio_url, s.duration, s.source, ps.added_at, ps.position '
                 'FROM playlist_songs ps JOIN songs s ON s.id = ps.song_id '
-                'WHERE ps.playlist_id = %s ORDER BY ps.added_at OFFSET %s LIMIT %s',
+                'WHERE ps.playlist_id = %s ORDER BY ps.position OFFSET %s LIMIT %s',
                 [pk, offset, limit],
             )
             song_rows = cursor.fetchall()
@@ -118,6 +118,7 @@ class PlaylistDetailView(APIView):
                 'audio_url': r[4],
                 'duration': r[5],
                 'source': r[6],
+                'position': r[8],
             }
             for r in song_rows
         ]
@@ -222,3 +223,25 @@ class PlaylistSongManageView(APIView):
             if cursor.rowcount == 0:
                 return Response({'detail': 'Song not in playlist'}, status=status.HTTP_404_NOT_FOUND)
         return Response({'detail': 'Song removed from playlist'})
+
+
+class PlaylistReorderView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, pk):
+        song_ids = request.data.get('song_ids', [])
+        if not isinstance(song_ids, list) or len(song_ids) < 2:
+            return Response({'detail': 'song_ids must be a list with at least 2 items'}, status=status.HTTP_400_BAD_REQUEST)
+
+        with connection.cursor() as cursor:
+            cursor.execute('SELECT 1 FROM playlists WHERE id = %s', [pk])
+            if not cursor.fetchone():
+                return Response({'detail': 'Playlist not found'}, status=status.HTTP_404_NOT_FOUND)
+
+            for idx, song_id in enumerate(song_ids):
+                cursor.execute(
+                    'UPDATE playlist_songs SET position = %s WHERE playlist_id = %s AND song_id = %s',
+                    [idx, pk, song_id],
+                )
+
+        return Response({'detail': 'Playlist reordered', 'song_ids': song_ids})
