@@ -3,11 +3,16 @@ from django.urls import path
 from .views import (
     AutocompleteView,
     ChartDetailView,
+    DownloadQuotaView,
+    DownloadedSongsView,
+    DownloadSongView,
     FavoriteListView,
     FavoriteToggleView,
     GenreTrackListView,
     HomeFeedView,
+    LyricsView,
     PlayHistoryView,
+    RelatedView,
     RecordPlayView,
     ResolveAudioView,
     SearchView,
@@ -29,4 +34,15 @@ urlpatterns = [
     # Phase 3 — Favorites
     path('favorites/', FavoriteListView.as_view(), name='favorites-list'),
     path('favorites/<str:song_id>/', FavoriteToggleView.as_view(), name='favorites-toggle'),
+
+    # Related
+    path('related/<str:song_id>/', RelatedView.as_view(), name='song-related'),
+
+    # Lyrics
+    path('lyrics/<str:song_id>/', LyricsView.as_view(), name='song-lyrics'),
+
+    # Offline Download
+    path('downloads/quota/', DownloadQuotaView.as_view(), name='downloads-quota'),
+    path('downloads/', DownloadedSongsView.as_view(), name='downloads-list'),
+    path('downloads/<str:song_id>/', DownloadSongView.as_view(), name='downloads-song'),
 ]

@@ -1,6 +1,11 @@
+import re as _re
 import httpx
 from django.conf import settings
 from django.core.cache import cache
+
+
+def _ck(key: str) -> str:
+    return _re.sub(r'[^a-zA-Z0-9_:.-]', '_', key)
 
 
 JAMENDO_CACHE_TTL = 3600
@@ -46,7 +51,7 @@ def _parse_track(item: dict) -> dict:
 
 
 def search(query: str, limit: int = 10) -> list:
-    cache_key = f'jamendo_search:{query}:{limit}'
+    cache_key = _ck(f'jamendo_search:{query}:{limit}')
     cached = cache.get(cache_key)
     if cached:
         return cached
@@ -58,7 +63,7 @@ def search(query: str, limit: int = 10) -> list:
 
 
 def get_tracks_by_genre(genre: str, limit: int = 20) -> list:
-    cache_key = f'jamendo_genre:{genre}:{limit}'
+    cache_key = _ck(f'jamendo_genre:{genre}:{limit}')
     cached = cache.get(cache_key)
     if cached:
         return cached
@@ -75,7 +80,7 @@ def get_tracks_by_genre(genre: str, limit: int = 20) -> list:
 
 
 def get_discovery(limit: int = 20) -> list:
-    cache_key = f'jamendo_discovery:{limit}'
+    cache_key = _ck(f'jamendo_discovery:{limit}')
     cached = cache.get(cache_key)
     if cached:
         return cached

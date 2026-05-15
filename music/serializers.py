@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import Song, PlayHistory, LikedSong
+from .models import Lyric, Song, PlayHistory, LikedSong
 
 
 class SongSerializer(serializers.ModelSerializer):
@@ -48,10 +48,11 @@ class ResolveAudioSerializer(serializers.Serializer):
     artist = serializers.CharField(required=False)
     deezer_id = serializers.CharField(required=False)
     youtube_id = serializers.CharField(required=False)
+    nct_url = serializers.CharField(required=False)
 
     def validate(self, attrs):
-        if not any(k in attrs for k in ('video_id', 'youtube_id', 'title')):
-            raise serializers.ValidationError('Provide video_id, youtube_id, or title+artist')
+        if not any(k in attrs for k in ('video_id', 'youtube_id', 'title', 'nct_url')):
+            raise serializers.ValidationError('Provide video_id, youtube_id, title+artist, or nct_url')
         return attrs
 
 
@@ -59,3 +60,24 @@ class SearchSerializer(serializers.Serializer):
     q = serializers.CharField(required=True)
     limit = serializers.IntegerField(default=10, min_value=1, max_value=50)
     sources = serializers.CharField(required=False, default='youtube,jamendo,nct')
+
+
+class DownloadSongSerializer(serializers.Serializer):
+    song_id = serializers.CharField(required=True)
+    title = serializers.CharField(required=False, allow_blank=True, default='')
+    subtitle = serializers.CharField(required=False, allow_blank=True, default='')
+    image_url = serializers.CharField(required=False, allow_blank=True, default='')
+    audio_url = serializers.CharField(required=False, allow_blank=True, default='')
+    duration = serializers.IntegerField(required=False, allow_null=True, default=None)
+    source = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class DownloadedSongSerializer(serializers.Serializer):
+    downloaded_at = serializers.DateTimeField()
+    song = SongSerializer(read_only=True)
+
+
+class LyricSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Lyric
+        fields = ['song_id', 'plain', 'synced', 'source', 'updated_at']

@@ -6,8 +6,6 @@ __pycache__/
 *.egg-info/
 dist/
 build/
-
-static/
-
-# Docker
-docker-compose.override.yml
+.git/
+.gitignore
+README.md

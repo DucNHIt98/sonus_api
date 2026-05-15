@@ -1,3 +1,4 @@
+import re as _re
 from typing import Optional
 import yt_dlp
 from django.core.cache import cache
@@ -7,12 +8,16 @@ YT_CACHE_TTL = 14400
 YT_SEARCH_CACHE_TTL = 3600
 
 
+def _ck(key: str) -> str:
+    return _re.sub(r'[^a-zA-Z0-9_:.-]', '_', key)
+
+
 class YouTubeError(Exception):
     pass
 
 
 def extract_audio_url(video_id: str) -> dict:
-    cache_key = f'yt_audio:{video_id}'
+    cache_key = _ck(f'yt_audio:{video_id}')
     cached = cache.get(cache_key)
     if cached:
         return cached
@@ -22,6 +27,7 @@ def extract_audio_url(video_id: str) -> dict:
         'quiet': True,
         'no_warnings': True,
         'extract_flat': False,
+        'extractor_args': {'youtube': {'player_client': ['android']}},
     }
     url = f'https://www.youtube.com/watch?v={video_id}'
     try:
@@ -42,7 +48,7 @@ def extract_audio_url(video_id: str) -> dict:
 
 
 def search_youtube(query: str, limit: int = 10) -> list:
-    cache_key = f'yt_search:{query}:{limit}'
+    cache_key = _ck(f'yt_search:{query}:{limit}')
     cached = cache.get(cache_key)
     if cached:
         return cached
@@ -82,7 +88,7 @@ def search_youtube(query: str, limit: int = 10) -> list:
 
 
 def get_autocomplete(query: str) -> list:
-    cache_key = f'yt_ac:{query}'
+    cache_key = _ck(f'yt_ac:{query}')
     cached = cache.get(cache_key)
     if cached:
         return cached
@@ -129,7 +135,7 @@ def convert_deezer_to_youtube(title: str, artist: str) -> Optional[dict]:
 
 
 def get_related_videos(video_id: str, limit: int = 10) -> list:
-    cache_key = f'yt_related:{video_id}:{limit}'
+    cache_key = _ck(f'yt_related:{video_id}:{limit}')
     cached = cache.get(cache_key)
     if cached:
         return cached

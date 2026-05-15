@@ -1,11 +1,12 @@
 from datetime import datetime, timezone
 
 from django.conf import settings
-from django.db import connection
-from django.utils import timezone
+from django.utils import timezone as django_timezone
 
 import stripe
 from stripe._error import StripeError, SignatureVerificationError
+
+from payments.models import Subscription
 
 
 class StripeNotConfigured(Exception):
@@ -102,22 +103,18 @@ def _handle_subscription_updated(data: dict):
 
 def _handle_subscription_deleted(data: dict):
     sub_id = data.get('id')
-    with connection.cursor() as cursor:
-        cursor.execute(
-            'UPDATE subscriptions SET status = %s, updated_at = NOW() WHERE stripe_subscription_id = %s',
-            ['canceled', sub_id],
-        )
+    Subscription.objects.filter(stripe_subscription_id=sub_id).update(
+        status='canceled', updated_at=django_timezone.now(),
+    )
 
 
 def _handle_invoice_payment_failed(data: dict):
     subscription_id = data.get('subscription')
     if not subscription_id:
         return
-    with connection.cursor() as cursor:
-        cursor.execute(
-            'UPDATE subscriptions SET status = %s, updated_at = NOW() WHERE stripe_subscription_id = %s',
-            ['past_due', subscription_id],
-        )
+    Subscription.objects.filter(stripe_subscription_id=subscription_id).update(
+        status='past_due', updated_at=django_timezone.now(),
+    )
 
 
 _EVENT_HANDLERS = {
@@ -132,46 +129,29 @@ _EVENT_HANDLERS = {
 def cancel_subscription(user_id: str) -> dict:
     s = _get_stripe()
 
-    with connection.cursor() as cursor:
-        cursor.execute(
-            'SELECT stripe_subscription_id FROM subscriptions WHERE user_id = %s AND status = %s',
-            [user_id, 'active'],
-        )
-        row = cursor.fetchone()
-
-    if not row:
+    sub = Subscription.objects.filter(user_id=user_id, status='active').first()
+    if not sub:
         return {'status': 'error', 'message': 'No active subscription found'}
 
-    sub_id = row[0]
     try:
-        s.Subscription.modify(sub_id, cancel_at_period_end=True)
+        s.Subscription.modify(sub.stripe_subscription_id, cancel_at_period_end=True)
     except StripeError as e:
         return {'status': 'error', 'message': str(e)}
 
-    with connection.cursor() as cursor:
-        cursor.execute(
-            'UPDATE subscriptions SET cancel_at_period_end = TRUE, updated_at = NOW() WHERE stripe_subscription_id = %s',
-            [sub_id],
-        )
+    Subscription.objects.filter(stripe_subscription_id=sub.stripe_subscription_id).update(
+        cancel_at_period_end=True, updated_at=django_timezone.now(),
+    )
 
     return {'status': 'success', 'message': 'Subscription will cancel at period end'}
 
 
 def get_subscription_status(user_id: str) -> dict:
-    with connection.cursor() as cursor:
-        cursor.execute(
-            '''
-            SELECT status, current_period_end, cancel_at_period_end, stripe_subscription_id
-            FROM subscriptions
-            WHERE user_id = %s AND status IN ('active', 'past_due', 'trialing')
-            ORDER BY current_period_end DESC NULLS LAST
-            LIMIT 1
-            ''',
-            [user_id],
-        )
-        row = cursor.fetchone()
+    sub = Subscription.objects.filter(
+        user_id=user_id,
+        status__in=['active', 'past_due', 'trialing'],
+    ).order_by('-current_period_end').first()
 
-    if not row:
+    if not sub:
         return {
             'is_premium': False,
             'premium_until': None,
@@ -179,16 +159,16 @@ def get_subscription_status(user_id: str) -> dict:
             'cancel_at_period_end': False,
         }
 
-    status, period_end, cancel_at_period_end, _ = row
-
-    now = timezone.now()
-    is_active = status in ('active', 'trialing') and (period_end is None or period_end > now)
+    now = django_timezone.now()
+    is_active = sub.status in ('active', 'trialing') and (
+        sub.current_period_end is None or sub.current_period_end > now
+    )
 
     return {
         'is_premium': is_active,
-        'premium_until': period_end.isoformat() if period_end else None,
-        'status': status,
-        'cancel_at_period_end': cancel_at_period_end,
+        'premium_until': sub.current_period_end.isoformat() if sub.current_period_end else None,
+        'status': sub.status,
+        'cancel_at_period_end': sub.cancel_at_period_end,
     }
 
 
@@ -201,50 +181,24 @@ def _upsert_subscription(
     period_end=None,
     cancel_at_period_end: bool = False,
 ):
-    with connection.cursor() as cursor:
-        cursor.execute(
-            'SELECT id FROM subscriptions WHERE stripe_subscription_id = %s',
-            [stripe_subscription_id],
-        )
-        existing = cursor.fetchone()
-
-        if existing:
-            cursor.execute(
-                '''
-                UPDATE subscriptions
-                SET status = %s, current_period_start = %s, current_period_end = %s,
-                    cancel_at_period_end = %s, updated_at = NOW()
-                WHERE stripe_subscription_id = %s
-                ''',
-                [status, period_start, period_end, cancel_at_period_end, stripe_subscription_id],
-            )
-        else:
-            cursor.execute(
-                '''
-                INSERT INTO subscriptions (user_id, stripe_subscription_id, stripe_customer_id,
-                    status, current_period_start, current_period_end, cancel_at_period_end)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                ''',
-                [user_id, stripe_subscription_id, stripe_customer_id,
-                 status, period_start, period_end, cancel_at_period_end],
-            )
+    Subscription.objects.update_or_create(
+        stripe_subscription_id=stripe_subscription_id,
+        defaults={
+            'user_id': user_id,
+            'stripe_customer_id': stripe_customer_id,
+            'status': status,
+            'current_period_start': period_start,
+            'current_period_end': period_end,
+            'cancel_at_period_end': cancel_at_period_end,
+        },
+    )
 
 
 def _get_user_id_by_stripe_customer(customer_id: str) -> str:
-    with connection.cursor() as cursor:
-        cursor.execute(
-            'SELECT user_id FROM subscriptions WHERE stripe_customer_id = %s LIMIT 1',
-            [customer_id],
-        )
-        row = cursor.fetchone()
-    return str(row[0]) if row else None
+    sub = Subscription.objects.filter(stripe_customer_id=customer_id).first()
+    return str(sub.user_id) if sub else None
 
 
 def _get_user_id_by_subscription_id(sub_id: str) -> str:
-    with connection.cursor() as cursor:
-        cursor.execute(
-            'SELECT user_id FROM subscriptions WHERE stripe_subscription_id = %s LIMIT 1',
-            [sub_id],
-        )
-        row = cursor.fetchone()
-    return str(row[0]) if row else None
+    sub = Subscription.objects.filter(stripe_subscription_id=sub_id).first()
+    return str(sub.user_id) if sub else None

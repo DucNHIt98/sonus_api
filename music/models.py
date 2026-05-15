@@ -60,3 +60,43 @@ class LikedSong(models.Model):
         managed = False
         db_table = 'liked_songs'
         unique_together = [['user', 'song']]
+
+
+class DownloadedSong(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        db_column='user_id',
+    )
+    song = models.ForeignKey(
+        Song,
+        on_delete=models.CASCADE,
+        db_column='song_id',
+    )
+    downloaded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'downloaded_songs'
+        unique_together = [['user', 'song']]
+
+    def __str__(self):
+        return f'{self.user_id} downloaded {self.song_id}'
+
+
+class Lyric(models.Model):
+    song = models.OneToOneField(
+        Song,
+        on_delete=models.CASCADE,
+        primary_key=True,
+        db_column='song_id',
+    )
+    plain = models.TextField(blank=True, null=True)
+    synced = models.TextField(blank=True, null=True)
+    source = models.CharField(max_length=50, blank=True, null=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'song_lyrics'
+
+    def __str__(self):
+        return f'Lyrics for {self.song_id}'
