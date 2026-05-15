@@ -25,6 +25,7 @@ urlpatterns = [
     path('history/record/', RecordPlayView.as_view(), name='history-record'),
     path('history/', PlayHistoryView.as_view(), name='history-list'),
     path('history/top/', TopPlayedView.as_view(), name='history-top'),
+
     # Phase 3 — Favorites
     path('favorites/', FavoriteListView.as_view(), name='favorites-list'),
     path('favorites/<str:song_id>/', FavoriteToggleView.as_view(), name='favorites-toggle'),

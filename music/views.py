@@ -255,6 +255,7 @@ class PlayHistoryView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        offset = int(request.query_params.get('offset', 0))
         limit = int(request.query_params.get('limit', 20))
         user_id = str(request.user.id)
 
@@ -262,8 +263,8 @@ class PlayHistoryView(APIView):
             cursor.execute(
                 'SELECT ph.count, ph.last_played, s.id, s.title, s.subtitle, s.image_url, s.audio_url, s.duration, s.source '
                 'FROM play_history ph JOIN songs s ON s.id = ph.song_id '
-                'WHERE ph.user_id = %s ORDER BY ph.last_played DESC LIMIT %s',
-                [user_id, limit],
+                'WHERE ph.user_id = %s ORDER BY ph.last_played DESC OFFSET %s LIMIT %s',
+                [user_id, offset, limit],
             )
             rows = cursor.fetchall()
             cursor.execute(
@@ -289,6 +290,26 @@ class PlayHistoryView(APIView):
             })
 
         return Response({'history': history, 'total': total})
+
+    def delete(self, request):
+        user_id = str(request.user.id)
+        song_id = request.query_params.get('song_id')
+
+        with connection.cursor() as cursor:
+            if song_id:
+                cursor.execute(
+                    'DELETE FROM play_history WHERE user_id = %s AND song_id = %s RETURNING id',
+                    [user_id, song_id],
+                )
+                if not cursor.fetchone():
+                    return Response({'detail': 'History entry not found'}, status=status.HTTP_404_NOT_FOUND)
+                return Response({'detail': 'History entry deleted'})
+            else:
+                cursor.execute(
+                    'DELETE FROM play_history WHERE user_id = %s',
+                    [user_id],
+                )
+                return Response({'detail': 'All history cleared'})
 
 
 class TopPlayedView(APIView):
@@ -352,16 +373,24 @@ class FavoriteListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        offset = int(request.query_params.get('offset', 0))
+        limit = int(request.query_params.get('limit', 20))
         user_id = str(request.user.id)
 
         with connection.cursor() as cursor:
             cursor.execute(
                 'SELECT ls.liked_at, s.id, s.title, s.subtitle, s.image_url, s.audio_url, s.duration, s.source '
                 'FROM liked_songs ls JOIN songs s ON s.id = ls.song_id '
-                'WHERE ls.user_id = %s ORDER BY ls.liked_at DESC',
-                [user_id],
+                'WHERE ls.user_id = %s ORDER BY ls.liked_at DESC OFFSET %s LIMIT %s',
+                [user_id, offset, limit],
             )
             rows = cursor.fetchall()
+
+            cursor.execute(
+                'SELECT COUNT(*) FROM liked_songs WHERE user_id = %s',
+                [user_id],
+            )
+            total = cursor.fetchone()[0]
 
         favorites = []
         for row in rows:
@@ -378,4 +407,4 @@ class FavoriteListView(APIView):
                 },
             })
 
-        return Response({'favorites': favorites})
+        return Response({'favorites': favorites, 'total': total})

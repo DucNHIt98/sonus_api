@@ -18,31 +18,38 @@ class PlaylistListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        offset = int(request.query_params.get('offset', 0))
+        limit = int(request.query_params.get('limit', 20))
+        user_id = str(request.user.id)
+
         with connection.cursor() as cursor:
             cursor.execute(
-                'SELECT id, title, description, image_url, created_at FROM playlists ORDER BY created_at DESC'
+                'SELECT p.id, p.title, p.description, p.image_url, p.created_at, '
+                '(SELECT COUNT(*) FROM playlist_songs WHERE playlist_id = p.id) AS song_count '
+                'FROM playlists p WHERE p.user_id = %s ORDER BY p.created_at DESC OFFSET %s LIMIT %s',
+                [user_id, offset, limit],
             )
             rows = cursor.fetchall()
 
-        playlists = []
-        for row in rows:
-            playlist_id = str(row[0])
-            with connection.cursor() as c:
-                c.execute(
-                    'SELECT COUNT(*) FROM playlist_songs WHERE playlist_id = %s',
-                    [playlist_id],
-                )
-                song_count = c.fetchone()[0]
-            playlists.append({
-                'id': playlist_id,
-                'title': row[1],
-                'description': row[2],
-                'image_url': row[3],
-                'song_count': song_count,
-                'created_at': row[4],
-            })
+            cursor.execute(
+                'SELECT COUNT(*) FROM playlists WHERE user_id = %s',
+                [user_id],
+            )
+            total = cursor.fetchone()[0]
 
-        return Response({'playlists': playlists})
+        playlists = [
+            {
+                'id': str(r[0]),
+                'title': r[1],
+                'description': r[2],
+                'image_url': r[3],
+                'song_count': r[5],
+                'created_at': r[4],
+            }
+            for r in rows
+        ]
+
+        return Response({'playlists': playlists, 'total': total})
 
     def post(self, request):
         serializer = PlaylistCreateSerializer(data=request.data)
@@ -76,6 +83,9 @@ class PlaylistDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, pk):
+        offset = int(request.query_params.get('offset', 0))
+        limit = int(request.query_params.get('limit', 50))
+
         with connection.cursor() as cursor:
             cursor.execute(
                 'SELECT id, title, description, image_url, created_at FROM playlists WHERE id = %s',
@@ -86,10 +96,16 @@ class PlaylistDetailView(APIView):
                 return Response({'detail': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
 
             cursor.execute(
+                'SELECT COUNT(*) FROM playlist_songs WHERE playlist_id = %s',
+                [pk],
+            )
+            total_songs = cursor.fetchone()[0]
+
+            cursor.execute(
                 'SELECT s.id, s.title, s.subtitle, s.image_url, s.audio_url, s.duration, s.source, ps.added_at '
                 'FROM playlist_songs ps JOIN songs s ON s.id = ps.song_id '
-                'WHERE ps.playlist_id = %s ORDER BY ps.added_at',
-                [pk],
+                'WHERE ps.playlist_id = %s ORDER BY ps.added_at OFFSET %s LIMIT %s',
+                [pk, offset, limit],
             )
             song_rows = cursor.fetchall()
 
@@ -112,6 +128,7 @@ class PlaylistDetailView(APIView):
             'description': row[2],
             'image_url': row[3],
             'songs': songs,
+            'song_count': total_songs,
             'created_at': row[4],
         })
 
@@ -121,7 +138,7 @@ class PlaylistDetailView(APIView):
 
         updates = []
         params = []
-        for field in ['title', 'description']:
+        for field in ['title', 'description', 'image_url']:
             if field in serializer.validated_data:
                 updates.append(f'{field} = %s')
                 params.append(serializer.validated_data[field])
@@ -184,11 +201,17 @@ class PlaylistSongManageView(APIView):
                 return Response({'detail': 'Song already in playlist'})
 
             cursor.execute(
-                'INSERT INTO playlist_songs (playlist_id, song_id, added_at) VALUES (%s, %s, %s)',
-                [pk, song_id, timezone.now()],
+                'SELECT COALESCE(MAX(position), 0) + 1 FROM playlist_songs WHERE playlist_id = %s',
+                [pk],
+            )
+            next_pos = cursor.fetchone()[0]
+
+            cursor.execute(
+                'INSERT INTO playlist_songs (playlist_id, song_id, added_at, position) VALUES (%s, %s, %s, %s)',
+                [pk, song_id, timezone.now(), next_pos],
             )
 
-        return Response({'detail': 'Song added to playlist'}, status=status.HTTP_201_CREATED)
+        return Response({'detail': 'Song added to playlist', 'position': next_pos}, status=status.HTTP_201_CREATED)
 
     def delete(self, request, pk, song_id):
         with connection.cursor() as cursor:

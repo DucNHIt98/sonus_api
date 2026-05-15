@@ -49,6 +49,7 @@ class PlaylistCreateSerializer(serializers.Serializer):
 class PlaylistUpdateSerializer(serializers.Serializer):
     title = serializers.CharField(required=False, max_length=255)
     description = serializers.CharField(required=False, allow_blank=True)
+    image_url = serializers.CharField(required=False, allow_blank=True)
 
 
 class AddSongSerializer(serializers.Serializer):
