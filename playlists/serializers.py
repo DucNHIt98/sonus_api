@@ -54,3 +54,9 @@ class PlaylistUpdateSerializer(serializers.Serializer):
 
 class AddSongSerializer(serializers.Serializer):
     song_id = serializers.CharField(required=True)
+    title = serializers.CharField(required=False, allow_blank=True, default='')
+    subtitle = serializers.CharField(required=False, allow_blank=True, default='')
+    image_url = serializers.CharField(required=False, allow_blank=True, default='')
+    audio_url = serializers.CharField(required=False, allow_blank=True, default='')
+    duration = serializers.IntegerField(required=False, allow_null=True, default=None)
+    source = serializers.CharField(required=False, allow_blank=True, default='youtube')

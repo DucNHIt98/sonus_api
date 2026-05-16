@@ -22,7 +22,7 @@ class PlayHistorySerializer(serializers.ModelSerializer):
 
 class RecordPlaySerializer(serializers.Serializer):
     song_id = serializers.CharField(required=True)
-    progress_percent = serializers.FloatField(required=True, min_value=0, max_value=100)
+    progress_percent = serializers.FloatField(required=False, default=100, min_value=0, max_value=100)
     title = serializers.CharField(required=False, allow_blank=True)
     subtitle = serializers.CharField(required=False, allow_blank=True)
     image_url = serializers.CharField(required=False, allow_blank=True)

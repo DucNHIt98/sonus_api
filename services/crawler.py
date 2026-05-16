@@ -29,7 +29,7 @@ def _save_songs(results: list, source: str) -> dict:
                 'image_url': (r.get('image_url') or '')[:500],
                 'audio_url': (r.get('audio_url') or '')[:500],
                 'duration': r.get('duration'),
-                'source': source,
+                'source': r.get('source') or source,
             },
         )
         if created:

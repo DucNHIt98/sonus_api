@@ -6,6 +6,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from core.permissions import FREE_PLAYLIST_LIMIT, is_premium
+from music.models import Song
 
 from .models import Playlist, PlaylistSong
 from .serializers import (
@@ -158,13 +159,26 @@ class PlaylistSongManageView(APIView):
 
         serializer = AddSongSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        song_id = serializer.validated_data['song_id']
+        data = serializer.validated_data
+        song_id = data['song_id']
 
         if PlaylistSong.objects.filter(playlist=playlist, song_id=song_id).exists():
             return Response({'detail': 'Song already in playlist'})
 
         max_pos = PlaylistSong.objects.filter(playlist=playlist)\
             .aggregate(max_pos=Max('position'))['max_pos'] or 0
+
+        Song.objects.get_or_create(
+            id=song_id,
+            defaults={
+                'title': data.get('title', ''),
+                'subtitle': data.get('subtitle', ''),
+                'image_url': data.get('image_url', ''),
+                'audio_url': data.get('audio_url', ''),
+                'duration': data.get('duration'),
+                'source': data.get('source') or 'youtube',
+            },
+        )
 
         PlaylistSong.objects.create(
             playlist=playlist,
