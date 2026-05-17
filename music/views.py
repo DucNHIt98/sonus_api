@@ -6,6 +6,7 @@ from threading import Thread
 
 from django.conf import settings
 from django.core.cache import cache
+from django.db import connection
 from django.db.models import F, Q
 from django.utils import timezone
 from rest_framework import status
@@ -79,6 +80,31 @@ def _song_to_search_result(song: Song) -> dict:
     }
 
 
+def _is_playable_song(song: Song) -> bool:
+    source = (song.source or '').lower()
+    audio_url = song.audio_url or ''
+    if source in {'db', 'test'} or 'example.com' in audio_url:
+        return False
+    if source == 'youtube':
+        return bool(_YOUTUBE_ID_RE.match(str(song.id)))
+    if source == 'search_cache':
+        return bool(audio_url) or bool(_YOUTUBE_ID_RE.match(str(song.id)))
+    if source in {'jamendo', 'nct', 'deezer_preview'}:
+        return True
+    return bool(audio_url)
+
+
+def _playable_results(qs, limit: int) -> list[dict]:
+    results = []
+    for song in qs[:limit * 5]:
+        if not _is_playable_song(song):
+            continue
+        results.append(_song_to_search_result(song))
+        if len(results) >= limit:
+            break
+    return results
+
+
 def _dedupe_results(results: list[dict], limit: int | None = None) -> list[dict]:
     seen = set()
     deduped = []
@@ -102,43 +128,36 @@ def _db_search_results(query: str, limit: int) -> list[dict]:
         | Q(subtitle__icontains=query)
         | Q(album_name__icontains=query)
     )
-    return [
-        _song_to_search_result(song)
-        for song in Song.objects.filter(query_filter).order_by('-created_at')[:limit]
-    ]
+    return _playable_results(Song.objects.filter(query_filter).order_by('-created_at'), limit)
 
 
 def _db_genre_results(genre: str, limit: int) -> list[dict]:
-    return [
-        _song_to_search_result(song)
-        for song in Song.objects.filter(genre__iexact=genre).order_by('-created_at')[:limit]
-    ]
+    return _playable_results(Song.objects.filter(genre__iexact=genre).order_by('-created_at'), limit)
 
 
 def _db_region_results(region: str, limit: int) -> list[dict]:
     normalized = region.replace('-', ' ')
-    return [
-        _song_to_search_result(song)
-        for song in Song.objects.filter(
+    return _playable_results(
+        Song.objects.filter(
             Q(region__iexact=region)
             | Q(region__iexact=normalized)
             | Q(genre__iexact=region)
             | Q(genre__iexact=normalized)
-        ).order_by('-created_at')[:limit]
-    ]
+        ).order_by('-created_at'),
+        limit,
+    )
 
 
 def _db_recent_results(limit: int) -> list[dict]:
-    return [
-        _song_to_search_result(song)
-        for song in Song.objects.order_by('-created_at')[:limit]
-    ]
+    return _playable_results(Song.objects.order_by('-created_at'), limit)
 
 
 def _db_genres_map(genres: list[str], per_limit: int) -> dict[str, list[dict]]:
     wanted = {genre.lower(): genre for genre in genres}
     grouped = {genre: [] for genre in genres}
-    for song in Song.objects.filter(genre__isnull=False).order_by('-created_at')[:200]:
+    for song in Song.objects.filter(genre__isnull=False).order_by('-created_at')[:300]:
+        if not _is_playable_song(song):
+            continue
         key = (song.genre or '').lower()
         genre = wanted.get(key)
         if genre and len(grouped[genre]) < per_limit:
@@ -154,6 +173,36 @@ def _can_call_jamendo() -> bool:
     return bool(settings.JAMENDO_CLIENT_ID)
 
 
+def _include_total(request) -> bool:
+    return request.query_params.get('return_total', 'true').lower() not in {'0', 'false', 'no'}
+
+
+def _cached_count(key: str, qs, timeout: int = 30) -> int:
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    count = qs.count()
+    cache.set(key, count, timeout=timeout)
+    return count
+
+
+def _clear_user_count_cache(user_id: str):
+    for prefix in ('history-count', 'favorites-count', 'downloads-count'):
+        cache.delete(f'{prefix}:{user_id}')
+
+
+def _user_list_version(user_id: str, list_name: str) -> int:
+    return cache.get(f'{list_name}-version:{user_id}') or 1
+
+
+def _bump_user_list_version(user_id: str, list_name: str):
+    key = f'{list_name}-version:{user_id}'
+    try:
+        cache.incr(key)
+    except ValueError:
+        cache.set(key, 2, timeout=None)
+
+
 class ResolveAudioView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -163,17 +212,29 @@ class ResolveAudioView(APIView):
         data = serializer.validated_data
 
         video_id = data.get('video_id') or data.get('youtube_id')
+        resolve_cache_key = _cache_key(
+            'resolve:v2',
+            video_id or '',
+            data.get('nct_url') or '',
+            data.get('title') or '',
+            data.get('artist') or '',
+        )
+        cached = cache.get(resolve_cache_key)
+        if cached:
+            return Response(cached)
 
         if video_id:
             try:
                 result = extract_audio_url(video_id)
-                return Response({
+                response = {
                     'youtube_id': video_id,
                     'audio_url': result['audio_url'],
                     'expires_at': result['expires_at'],
                     'title': result.get('title'),
                     'duration': result.get('duration'),
-                })
+                }
+                cache.set(resolve_cache_key, response, timeout=3600)
+                return Response(response)
             except YouTubeError as e:
                 return Response({'detail': str(e)}, status=status.HTTP_502_BAD_GATEWAY)
 
@@ -185,10 +246,12 @@ class ResolveAudioView(APIView):
                     {'detail': 'Could not resolve NCT audio'},
                     status=status.HTTP_404_NOT_FOUND,
                 )
-            return Response({
+            response = {
                 'audio_url': result['audio_url'],
                 'source': 'nct',
-            })
+            }
+            cache.set(resolve_cache_key, response, timeout=3600)
+            return Response(response)
 
         title = data.get('title')
         artist = data.get('artist', '')
@@ -202,13 +265,15 @@ class ResolveAudioView(APIView):
                         status=status.HTTP_404_NOT_FOUND,
                     )
                 audio = extract_audio_url(yt_data['id'])
-                return Response({
+                response = {
                     'youtube_id': yt_data['id'],
                     'audio_url': audio['audio_url'],
                     'expires_at': audio['expires_at'],
                     'title': audio.get('title', title),
                     'duration': audio.get('duration'),
-                })
+                }
+                cache.set(resolve_cache_key, response, timeout=3600)
+                return Response(response)
             except YouTubeError as e:
                 return Response({'detail': str(e)}, status=status.HTTP_502_BAD_GATEWAY)
 
@@ -310,7 +375,7 @@ class HomeFeedView(APIView):
 
     def get(self, request):
         premium = _is_premium_cached(str(request.user.id))
-        cache_key = f'home_feed:{"premium" if premium else "free"}:v3'
+        cache_key = f'home_feed:{"premium" if premium else "free"}:v4'
         cached = cache.get(cache_key)
         if cached:
             return Response(cached)
@@ -328,8 +393,18 @@ class HomeFeedView(APIView):
                 external_tracks = []
             genres[genre] = _merge_db_first(db_tracks, external_tracks, 10)
 
+        trending = _db_recent_results(20)
+        try:
+            if not trending and _can_call_jamendo():
+                trending = jamendo_discovery(20)
+        except JamendoError:
+            pass
+
         if not premium:
-            feed = {'genres': genres}
+            feed = {
+                'trending': trending,
+                'genres': genres,
+            }
             cache.set(cache_key, feed, timeout=1800)
             return Response(feed)
 
@@ -344,13 +419,6 @@ class HomeFeedView(APIView):
             except Exception:
                 external_tracks = []
             charts[region] = _merge_db_first(db_tracks, external_tracks, 20)
-
-        trending = _db_recent_results(20)
-        try:
-            if not trending and _can_call_jamendo():
-                trending = jamendo_discovery(20)
-        except JamendoError:
-            pass
 
         feed = {
             'trending': trending,
@@ -375,32 +443,44 @@ class ChartDetailView(APIView):
         region = request.query_params.get('region', '')
         if not region:
             return Response({'detail': 'region parameter is required'}, status=status.HTTP_400_BAD_REQUEST)
+        cache_key = _cache_key('chart:v2', region.lower().strip())
+        cached = cache.get(cache_key)
+        if cached:
+            return Response(cached)
 
         db_tracks = _db_region_results(region, 20)
         external_tracks = nct_get_chart(region) if not db_tracks else []
         tracks = _merge_db_first(db_tracks, external_tracks, 20)
-        return Response({'region': region, 'tracks': tracks})
+        response = {'region': region, 'tracks': tracks}
+        cache.set(cache_key, response, timeout=1800)
+        return Response(response)
 
 
 class GenreTrackListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        if not _is_premium_cached(str(request.user.id)):
-            return Response(
-                {'detail': 'Genre tracks are a Premium feature. Upgrade to access full genre details.'},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-
         genre = request.query_params.get('genre', '')
         if not genre:
             return Response({'detail': 'genre parameter is required'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            db_tracks = _db_genre_results(genre, 20)
-            external_tracks = jamendo_genre(genre, 20) if not db_tracks and _can_call_jamendo() else []
-            tracks = _merge_db_first(db_tracks, external_tracks, 20)
-            return Response({'genre': genre, 'tracks': tracks})
+            premium = _is_premium_cached(str(request.user.id))
+            limit = 20 if premium else 10
+            cache_key = _cache_key('genre:v2', genre.lower().strip(), limit)
+            cached = cache.get(cache_key)
+            if cached:
+                return Response(cached)
+            db_tracks = _db_genre_results(genre, limit)
+            external_tracks = jamendo_genre(genre, limit) if not db_tracks and _can_call_jamendo() else []
+            tracks = _merge_db_first(db_tracks, external_tracks, limit)
+            response = {
+                'genre': genre,
+                'tracks': tracks,
+                'truncated': not premium and len(tracks) >= limit,
+            }
+            cache.set(cache_key, response, timeout=1800)
+            return Response(response)
         except JamendoError as e:
             return Response({'detail': str(e)}, status=status.HTTP_502_BAD_GATEWAY)
 
@@ -426,19 +506,40 @@ class RecordPlayView(APIView):
             },
         )
 
-        history, created = PlayHistory.objects.get_or_create(
-            user=request.user,
-            song_id=song_id,
-            defaults={'count': 1, 'last_played': timezone.now()},
-        )
-        if not created:
-            PlayHistory.objects.filter(pk=history.pk).update(
-                count=F('count') + 1,
-                last_played=timezone.now(),
+        now = timezone.now()
+        if connection.vendor == 'postgresql':
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    '''
+                    INSERT INTO play_history (user_id, song_id, count, last_played)
+                    VALUES (%s, %s, 1, %s)
+                    ON CONFLICT (user_id, song_id)
+                    DO UPDATE SET count = play_history.count + 1, last_played = EXCLUDED.last_played
+                    RETURNING count
+                    ''',
+                    [str(request.user.id), song_id, now],
+                )
+                count = cursor.fetchone()[0]
+        else:
+            history, created = PlayHistory.objects.get_or_create(
+                user=request.user,
+                song_id=song_id,
+                defaults={'count': 1, 'last_played': now},
             )
-            history.refresh_from_db()
+            if created:
+                count = history.count
+            else:
+                PlayHistory.objects.filter(pk=history.pk).update(
+                    count=F('count') + 1,
+                    last_played=now,
+                )
+                history.refresh_from_db()
+                count = history.count
+        cache.delete(f'history-count:{request.user.id}')
+        cache.delete(f'user-stats:{request.user.id}')
+        _bump_user_list_version(str(request.user.id), 'history')
 
-        return Response({'detail': 'Play recorded', 'count': history.count})
+        return Response({'detail': 'Play recorded', 'count': count})
 
 
 class PlayHistoryView(APIView):
@@ -456,7 +557,19 @@ class PlayHistoryView(APIView):
             cutoff = timezone.now() - timedelta(days=FREE_HISTORY_DAYS)
             qs = qs.filter(last_played__gte=cutoff)
 
-        total = qs.count()
+        cache_key = _cache_key(
+            'history-page:v1',
+            request.user.id,
+            _user_list_version(str(request.user.id), 'history'),
+            offset,
+            limit,
+            _include_total(request),
+        )
+        cached = cache.get(cache_key)
+        if cached:
+            return Response(cached)
+
+        total = _cached_count(f'history-count:{request.user.id}', qs) if _include_total(request) else None
 
         history = []
         for h in qs[offset:offset + limit]:
@@ -475,7 +588,9 @@ class PlayHistoryView(APIView):
                 },
             })
 
-        return Response({'history': history, 'total': total})
+        response = {'history': history, 'total': total}
+        cache.set(cache_key, response, timeout=60)
+        return Response(response)
 
     def delete(self, request):
         song_id = request.query_params.get('song_id')
@@ -485,9 +600,15 @@ class PlayHistoryView(APIView):
             deleted, _ = qs.filter(song_id=song_id).delete()
             if deleted == 0:
                 return Response({'detail': 'History entry not found'}, status=status.HTTP_404_NOT_FOUND)
+            cache.delete(f'history-count:{request.user.id}')
+            cache.delete(f'user-stats:{request.user.id}')
+            _bump_user_list_version(str(request.user.id), 'history')
             return Response({'detail': 'History entry deleted'})
         else:
             qs.delete()
+            cache.delete(f'history-count:{request.user.id}')
+            cache.delete(f'user-stats:{request.user.id}')
+            _bump_user_list_version(str(request.user.id), 'history')
             return Response({'detail': 'All history cleared'})
 
 
@@ -547,9 +668,15 @@ class FavoriteToggleView(APIView):
                 song_id=song_id,
                 defaults={'liked_at': timezone.now()},
             )
+            cache.delete(f'favorites-count:{request.user.id}')
+            cache.delete(f'user-stats:{request.user.id}')
+            _bump_user_list_version(str(request.user.id), 'favorites')
             return Response({'detail': 'Added to favorites', 'liked': True})
         else:
             LikedSong.objects.filter(user=request.user, song_id=song_id).delete()
+            cache.delete(f'favorites-count:{request.user.id}')
+            cache.delete(f'user-stats:{request.user.id}')
+            _bump_user_list_version(str(request.user.id), 'favorites')
             return Response({'detail': 'Removed from favorites', 'liked': False})
 
 
@@ -563,7 +690,18 @@ class FavoriteListView(APIView):
         qs = LikedSong.objects.filter(user=request.user)\
             .select_related('song')\
             .order_by('-liked_at')
-        total = qs.count()
+        cache_key = _cache_key(
+            'favorites-page:v1',
+            request.user.id,
+            _user_list_version(str(request.user.id), 'favorites'),
+            offset,
+            limit,
+            _include_total(request),
+        )
+        cached = cache.get(cache_key)
+        if cached:
+            return Response(cached)
+        total = _cached_count(f'favorites-count:{request.user.id}', qs) if _include_total(request) else None
 
         favorites = []
         for ls in qs[offset:offset + limit]:
@@ -581,7 +719,9 @@ class FavoriteListView(APIView):
                 },
             })
 
-        return Response({'favorites': favorites, 'total': total})
+        response = {'favorites': favorites, 'total': total}
+        cache.set(cache_key, response, timeout=60)
+        return Response(response)
 
 
 class DownloadSongView(APIView):
@@ -617,6 +757,8 @@ class DownloadSongView(APIView):
                 )
 
         downloaded = DownloadedSong.objects.create(user=request.user, song_id=song_id)
+        cache.delete(f'downloads-count:{request.user.id}')
+        _bump_user_list_version(str(request.user.id), 'downloads')
         return Response(
             {'detail': 'Song downloaded', 'downloaded_at': downloaded.downloaded_at},
             status=status.HTTP_201_CREATED,
@@ -626,6 +768,8 @@ class DownloadSongView(APIView):
         deleted, _ = DownloadedSong.objects.filter(user=request.user, song_id=song_id).delete()
         if deleted == 0:
             return Response({'detail': 'Downloaded song not found'}, status=status.HTTP_404_NOT_FOUND)
+        cache.delete(f'downloads-count:{request.user.id}')
+        _bump_user_list_version(str(request.user.id), 'downloads')
         return Response({'detail': 'Download removed'}, status=status.HTTP_200_OK)
 
 
@@ -639,7 +783,18 @@ class DownloadedSongsView(APIView):
         qs = DownloadedSong.objects.filter(user=request.user)\
             .select_related('song')\
             .order_by('-downloaded_at')
-        total = qs.count()
+        cache_key = _cache_key(
+            'downloads-page:v1',
+            request.user.id,
+            _user_list_version(str(request.user.id), 'downloads'),
+            offset,
+            limit,
+            _include_total(request),
+        )
+        cached = cache.get(cache_key)
+        if cached:
+            return Response(cached)
+        total = _cached_count(f'downloads-count:{request.user.id}', qs) if _include_total(request) else None
 
         downloads = []
         for d in qs[offset:offset + limit]:
@@ -657,7 +812,9 @@ class DownloadedSongsView(APIView):
                 },
             })
 
-        return Response({'downloads': downloads, 'total': total})
+        response = {'downloads': downloads, 'total': total}
+        cache.set(cache_key, response, timeout=60)
+        return Response(response)
 
 
 class RelatedView(APIView):
@@ -665,6 +822,10 @@ class RelatedView(APIView):
 
     def get(self, request, song_id):
         limit = int(request.query_params.get('limit', 10))
+        cache_key = _cache_key('related:v2', song_id, limit)
+        cached = cache.get(cache_key)
+        if cached:
+            return Response(cached)
         song = Song.objects.filter(id=song_id).first()
         db_results = []
 
@@ -673,7 +834,9 @@ class RelatedView(APIView):
             db_results = [r for r in db_results if r['id'] != song_id]
             if db_results:
                 results = _dedupe_results(db_results, limit)
-                return Response({'results': results, 'total': len(results)})
+                response = {'results': results, 'total': len(results)}
+                cache.set(cache_key, response, timeout=1800)
+                return Response(response)
 
         external_results = []
 
@@ -687,10 +850,12 @@ class RelatedView(APIView):
 
         results = _merge_db_first(db_results, external_results, limit)
 
-        return Response({
+        response = {
             'results': results,
             'total': len(results),
-        })
+        }
+        cache.set(cache_key, response, timeout=1800)
+        return Response(response)
 
 
 class LyricsView(APIView):
@@ -716,7 +881,10 @@ class DownloadQuotaView(APIView):
 
     def get(self, request):
         premium = _is_premium_cached(str(request.user.id))
-        current_count = DownloadedSong.objects.filter(user=request.user).count()
+        current_count = _cached_count(
+            f'downloads-count:{request.user.id}',
+            DownloadedSong.objects.filter(user=request.user),
+        )
 
         return Response({
             'is_premium': premium,

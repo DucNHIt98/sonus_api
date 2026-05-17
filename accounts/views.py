@@ -4,6 +4,7 @@ from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from django.core.cache import cache
 
 
 
@@ -55,6 +56,9 @@ class LogoutView(APIView):
 
     def post(self, request):
         request.auth_session.revoke()
+        cache_key = getattr(request, 'auth_session_cache_key', None)
+        if cache_key:
+            cache.delete(cache_key)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -87,7 +91,7 @@ class CurrentUserView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        return Response(UserSerializer(request.user).data)
+        return Response(UserSerializer(request.user, context={'include_stats': True}).data)
 
     def patch(self, request):
         serializer = UserSerializer(request.user, data=request.data, partial=True)

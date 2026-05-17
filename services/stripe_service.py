@@ -1,12 +1,25 @@
 from datetime import datetime, timezone
 
 from django.conf import settings
+from django.core.cache import cache
 from django.utils import timezone as django_timezone
 
 import stripe
 from stripe._error import StripeError, SignatureVerificationError
 
 from payments.models import Subscription
+
+
+SUBSCRIPTION_STATUS_CACHE_TTL = 60
+
+
+def _subscription_status_cache_key(user_id: str) -> str:
+    return f'subscription-status:{user_id}'
+
+
+def clear_subscription_status_cache(user_id: str):
+    if user_id:
+        cache.delete(_subscription_status_cache_key(user_id))
 
 
 class StripeNotConfigured(Exception):
@@ -103,18 +116,26 @@ def _handle_subscription_updated(data: dict):
 
 def _handle_subscription_deleted(data: dict):
     sub_id = data.get('id')
-    Subscription.objects.filter(stripe_subscription_id=sub_id).update(
+    sub = Subscription.objects.filter(stripe_subscription_id=sub_id).first()
+    if not sub:
+        return
+    Subscription.objects.filter(pk=sub.pk).update(
         status='canceled', updated_at=django_timezone.now(),
     )
+    clear_subscription_status_cache(str(sub.user_id))
 
 
 def _handle_invoice_payment_failed(data: dict):
     subscription_id = data.get('subscription')
     if not subscription_id:
         return
-    Subscription.objects.filter(stripe_subscription_id=subscription_id).update(
+    sub = Subscription.objects.filter(stripe_subscription_id=subscription_id).first()
+    if not sub:
+        return
+    Subscription.objects.filter(pk=sub.pk).update(
         status='past_due', updated_at=django_timezone.now(),
     )
+    clear_subscription_status_cache(str(sub.user_id))
 
 
 _EVENT_HANDLERS = {
@@ -141,35 +162,45 @@ def cancel_subscription(user_id: str) -> dict:
     Subscription.objects.filter(stripe_subscription_id=sub.stripe_subscription_id).update(
         cancel_at_period_end=True, updated_at=django_timezone.now(),
     )
+    clear_subscription_status_cache(user_id)
 
     return {'status': 'success', 'message': 'Subscription will cancel at period end'}
 
 
 def get_subscription_status(user_id: str) -> dict:
+    cache_key = _subscription_status_cache_key(user_id)
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     sub = Subscription.objects.filter(
         user_id=user_id,
         status__in=['active', 'past_due', 'trialing'],
     ).order_by('-current_period_end').first()
 
     if not sub:
-        return {
+        result = {
             'is_premium': False,
             'premium_until': None,
             'status': None,
             'cancel_at_period_end': False,
         }
+        cache.set(cache_key, result, timeout=SUBSCRIPTION_STATUS_CACHE_TTL)
+        return result
 
     now = django_timezone.now()
     is_active = sub.status in ('active', 'trialing') and (
         sub.current_period_end is None or sub.current_period_end > now
     )
 
-    return {
+    result = {
         'is_premium': is_active,
         'premium_until': sub.current_period_end.isoformat() if sub.current_period_end else None,
         'status': sub.status,
         'cancel_at_period_end': sub.cancel_at_period_end,
     }
+    cache.set(cache_key, result, timeout=SUBSCRIPTION_STATUS_CACHE_TTL)
+    return result
 
 
 def _upsert_subscription(
@@ -181,7 +212,7 @@ def _upsert_subscription(
     period_end=None,
     cancel_at_period_end: bool = False,
 ):
-    Subscription.objects.update_or_create(
+    sub, _ = Subscription.objects.update_or_create(
         stripe_subscription_id=stripe_subscription_id,
         defaults={
             'user_id': user_id,
@@ -192,6 +223,7 @@ def _upsert_subscription(
             'cancel_at_period_end': cancel_at_period_end,
         },
     )
+    clear_subscription_status_cache(str(sub.user_id))
 
 
 def _get_user_id_by_stripe_customer(customer_id: str) -> str:

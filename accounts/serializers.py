@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from django.core.cache import cache
 
 from .models import User, UserCredential
 
@@ -24,30 +25,38 @@ class UserSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'email', 'username', 'is_premium', 'premium_until', 'stats']
 
     def get_is_premium(self, obj):
-        from services.stripe_service import get_subscription_status
-        try:
-            result = get_subscription_status(str(obj.id))
-            return result['is_premium']
-        except Exception:
-            return False
+        return self._subscription_status(obj).get('is_premium', False)
 
     def get_premium_until(self, obj):
+        return self._subscription_status(obj).get('premium_until')
+
+    def _subscription_status(self, obj):
+        if 'subscription_status' in self.context:
+            return self.context['subscription_status']
         from services.stripe_service import get_subscription_status
         try:
-            result = get_subscription_status(str(obj.id))
-            return result['premium_until']
+            return get_subscription_status(str(obj.id))
         except Exception:
-            return None
+            return {'is_premium': False, 'premium_until': None}
 
     def get_stats(self, obj):
+        if not self.context.get('include_stats', False):
+            return None
+        cache_key = f'user-stats:{obj.id}'
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         from music.models import LikedSong, PlayHistory
         from playlists.models import Playlist
 
-        return {
+        stats = {
             'listened_count': PlayHistory.objects.filter(user=obj).count(),
             'favorites_count': LikedSong.objects.filter(user=obj).count(),
             'playlists_count': Playlist.objects.filter(user=obj).count(),
         }
+        cache.set(cache_key, stats, timeout=60)
+        return stats
 
 
 class RegisterSerializer(serializers.Serializer):
