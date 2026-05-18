@@ -5,6 +5,10 @@ from django.db import models
 
 
 class Playlist(models.Model):
+    """
+    Playlist do người dùng tạo ra. managed=False vì bảng 'playlists'
+    được tạo bên ngoài Django (Supabase migration).
+    """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -25,6 +29,12 @@ class Playlist(models.Model):
 
 
 class PlaylistSong(models.Model):
+    """
+    Bảng trung gian nối Playlist ↔ Song, lưu thêm trường position để
+    duy trì thứ tự bài hát trong playlist (người dùng có thể reorder).
+    created_at map tới cột 'added_at' trong DB (db_column='added_at').
+    managed=False vì bảng tồn tại sẵn trong Supabase.
+    """
     playlist = models.ForeignKey(
         Playlist,
         on_delete=models.CASCADE,
@@ -36,6 +46,7 @@ class PlaylistSong(models.Model):
         db_column='song_id',
     )
     position = models.IntegerField(default=0)
+    # Trong DB cột tên là 'added_at', Django alias thành created_at
     created_at = models.DateTimeField(db_column='added_at')
 
     class Meta:

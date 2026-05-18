@@ -6,6 +6,17 @@ from accounts.models import User
 
 
 class Subscription(models.Model):
+    """
+    Lưu thông tin subscription Stripe của từng user.
+    managed=False vì bảng này được cập nhật bởi Stripe webhook (payments/views.py),
+    không phải do Django migration tạo ra.
+
+    Trường status phản ánh trạng thái Stripe: 'active', 'trialing', 'canceled',
+    'past_due', 'incomplete'. Chỉ 'active' và 'trialing' được coi là Premium.
+
+    cancel_at_period_end=True nghĩa là user đã yêu cầu hủy nhưng vẫn còn
+    quyền dùng đến cuối kỳ thanh toán hiện tại.
+    """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(User, on_delete=models.CASCADE, db_column='user_id')
     stripe_subscription_id = models.TextField(unique=True, null=True, blank=True)

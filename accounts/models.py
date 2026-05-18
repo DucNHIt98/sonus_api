@@ -10,6 +10,12 @@ from django.utils import timezone
 
 
 class User(models.Model):
+    """
+    Model ánh xạ tới bảng 'users' do Supabase quản lý.
+    managed=False vì Django không tạo/xóa bảng này — Supabase Auth tự xử lý.
+    Không có trường password vì password được lưu riêng trong UserCredential
+    (dành cho đăng ký nội bộ) hoặc do Supabase OAuth quản lý.
+    """
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = []
 
@@ -26,6 +32,7 @@ class User(models.Model):
 
     @property
     def is_authenticated(self):
+        # Luôn True vì User chỉ tồn tại khi đã xác thực qua session
         return True
 
     @property
@@ -44,6 +51,11 @@ class User(models.Model):
 
 
 class UserCredential(models.Model):
+    """
+    Lưu password hash cho user đăng ký theo flow nội bộ (email + password).
+    Tách khỏi User vì user đăng nhập qua Supabase OAuth sẽ không có credential này.
+    Quan hệ OneToOne đảm bảo mỗi user chỉ có một bộ credential.
+    """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='credential')
     password_hash = models.CharField(max_length=128)
@@ -54,6 +66,7 @@ class UserCredential(models.Model):
         db_table = 'user_credentials'
 
     def set_password(self, raw_password):
+        # Dùng Django's make_password để hash an toàn (PBKDF2 + salt)
         self.password_hash = make_password(raw_password)
 
     def check_password(self, raw_password):
@@ -61,6 +74,12 @@ class UserCredential(models.Model):
 
 
 class UserSession(models.Model):
+    """
+    Session token-based authentication. Mỗi lần đăng nhập tạo một session mới.
+    Token raw chỉ trả về cho client một lần, DB chỉ lưu hash của token để
+    tránh lộ token nếu DB bị breach.
+    Hỗ trợ multi-device: một user có thể có nhiều session hoạt động song song.
+    """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='sessions')
     token_hash = models.CharField(max_length=64, unique=True)
@@ -82,10 +101,16 @@ class UserSession(models.Model):
 
     @staticmethod
     def hash_token(token):
+        # SHA-256 đủ nhanh và an toàn cho lookup token trong DB
         return hashlib.sha256(token.encode('utf-8')).hexdigest()
 
     @classmethod
     def create_for_user(cls, user, request=None):
+        """
+        Tạo session mới cho user sau khi đăng nhập thành công.
+        Trả về (token_raw, session): token_raw gửi về client, session lưu DB.
+        TTL lấy từ settings.AUTH_SESSION_TTL_DAYS.
+        """
         token = secrets.token_urlsafe(48)
         ttl = timedelta(days=settings.AUTH_SESSION_TTL_DAYS)
         session = cls.objects.create(
@@ -99,6 +124,10 @@ class UserSession(models.Model):
 
     @staticmethod
     def _client_ip(request):
+        """
+        Ưu tiên X-Forwarded-For khi chạy sau reverse proxy (nginx, load balancer).
+        Lấy IP đầu tiên trong chuỗi vì đó là IP client thực.
+        """
         if not request:
             return None
         forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
@@ -108,6 +137,7 @@ class UserSession(models.Model):
 
     @property
     def is_valid(self):
+        # Session hợp lệ khi chưa bị revoke và chưa hết hạn
         return self.revoked_at is None and self.expires_at > timezone.now()
 
     def revoke(self):

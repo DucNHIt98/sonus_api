@@ -101,7 +101,11 @@ REST_FRAMEWORK = {
     'DEFAULT_RENDERER_CLASSES': [
         'rest_framework.renderers.JSONRenderer',
     ],
-    'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
+    # Dùng custom handler để mọi lỗi DRF đều trả về schema chuẩn {status, code, message, errors}
+    'EXCEPTION_HANDLER': 'core.exceptions.custom_exception_handler',
+    # Pagination mặc định không dùng vì các view tự quản lý offset/limit;
+    # schema phân trang chuẩn được build qua core.pagination.paginate().
+    'DEFAULT_PAGINATION_CLASS': None,
     'PAGE_SIZE': 20,
 }
 

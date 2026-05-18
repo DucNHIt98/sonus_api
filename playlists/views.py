@@ -1,28 +1,43 @@
+import logging
+
 from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Count, Max
 from django.utils import timezone
-from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.response import Response
 from rest_framework.views import APIView
 
+logger = logging.getLogger(__name__)
+
 from core.permissions import FREE_PLAYLIST_LIMIT, is_premium
+from core.responses import success, created, no_content, bad_request, forbidden, not_found
+from core.pagination import paginate, parse_offset_limit
 from music.models import Song
 
 from .models import Playlist, PlaylistSong
 from .serializers import (
     AddSongSerializer,
     PlaylistCreateSerializer,
+    PlaylistDetailSerializer,
+    PlaylistListSerializer,
     PlaylistUpdateSerializer,
 )
 
 
 def _include_total(request) -> bool:
+    """
+    Kiểm tra client có muốn nhận tổng số record không.
+    Mặc định trả về True. Client có thể tắt bằng ?return_total=false
+    để tiết kiệm một DB count query khi không cần thiết.
+    """
     return request.query_params.get('return_total', 'true').lower() not in {'0', 'false', 'no'}
 
 
 def _cached_count(key: str, qs, timeout: int = 30) -> int:
+    """
+    Đếm số record với cache ngắn hạn (mặc định 30s).
+    Tránh gọi .count() mỗi request khi danh sách ít thay đổi.
+    """
     cached = cache.get(key)
     if cached is not None:
         return cached
@@ -32,6 +47,7 @@ def _cached_count(key: str, qs, timeout: int = 30) -> int:
 
 
 def _is_premium_cached(user_id: str) -> bool:
+    """Cache kết quả kiểm tra Premium 60s để tránh query DB subscription mỗi request."""
     key = f'user-premium:{user_id}'
     cached = cache.get(key)
     if cached is not None:
@@ -42,10 +58,19 @@ def _is_premium_cached(user_id: str) -> bool:
 
 
 def _list_version(key: str) -> int:
+    """
+    Lấy version hiện tại của một danh sách trong cache.
+    Version được nhúng vào cache key để tự động invalidate trang cũ
+    khi danh sách thay đổi (thêm/xóa/sửa playlist).
+    """
     return cache.get(key) or 1
 
 
 def _bump_list_version(key: str):
+    """
+    Tăng version của danh sách → tất cả cache key cũ chứa version cũ sẽ miss.
+    Dùng cache.incr() nếu key tồn tại; nếu không thì set = 2 (1 là giá trị mặc định).
+    """
     try:
         cache.incr(key)
     except ValueError:
@@ -53,48 +78,43 @@ def _bump_list_version(key: str):
 
 
 class PlaylistListView(APIView):
+    """
+    GET  /playlists/  — Danh sách playlist của user (phân trang offset/limit).
+    POST /playlists/  — Tạo playlist mới (giới hạn FREE_PLAYLIST_LIMIT cho tài khoản Free).
+    """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        offset = int(request.query_params.get('offset', 0))
-        limit = int(request.query_params.get('limit', 20))
+        offset, limit = parse_offset_limit(request)
 
+        # annotate song_count để PlaylistListSerializer đọc trực tiếp, không query N+1
         qs = Playlist.objects.filter(user=request.user)\
             .annotate(song_count=Count('playlistsong'))\
             .order_by('-created_at')
         include_total = _include_total(request)
+
+        # Cache key nhúng version để tự invalidate khi playlist thay đổi
         cache_key = (
             f'playlists-page:{request.user.id}:'
             f'{_list_version(f"playlists-version:{request.user.id}")}:{offset}:{limit}:{include_total}'
         )
         cached = cache.get(cache_key)
         if cached:
-            return Response(cached)
+            return success(cached)
+
         total = _cached_count(f'playlists-count:{request.user.id}', qs) if include_total else None
-
-        playlists = [
-            {
-                'id': str(p.id),
-                'title': p.title,
-                'description': p.description,
-                'image_url': p.image_url,
-                'song_count': p.song_count,
-                'created_at': p.created_at,
-            }
-            for p in qs[offset:offset + limit]
-        ]
-
-        response = {'playlists': playlists, 'total': total}
-        cache.set(cache_key, response, timeout=60)
-        return Response(response)
+        items = PlaylistListSerializer(qs[offset:offset + limit], many=True).data
+        data = paginate(items, offset, limit, total)
+        cache.set(cache_key, data, timeout=60)
+        return success(data)
 
     def post(self, request):
+        # Kiểm tra giới hạn playlist trước khi tạo (chỉ áp dụng cho Free tier)
         if not _is_premium_cached(str(request.user.id)):
             current_count = Playlist.objects.filter(user=request.user).count()
             if current_count >= FREE_PLAYLIST_LIMIT:
-                return Response(
-                    {'detail': f'Playlist limit reached ({FREE_PLAYLIST_LIMIT}). Upgrade to Premium for unlimited playlists.'},
-                    status=status.HTTP_403_FORBIDDEN,
+                return forbidden(
+                    f'Playlist limit reached ({FREE_PLAYLIST_LIMIT}). Upgrade to Premium for unlimited playlists.'
                 )
 
         serializer = PlaylistCreateSerializer(data=request.data)
@@ -107,31 +127,31 @@ class PlaylistListView(APIView):
             image_url=serializer.validated_data.get('image_url', ''),
             created_at=timezone.now(),
         )
+        # Xóa cache count và bump version để GET list tự invalidate
         cache.delete(f'playlists-count:{request.user.id}')
         cache.delete(f'user-stats:{request.user.id}')
         _bump_list_version(f'playlists-version:{request.user.id}')
 
-        return Response({
-            'id': str(playlist.id),
-            'title': playlist.title,
-            'description': playlist.description,
-            'image_url': playlist.image_url,
-            'song_count': 0,
-            'created_at': playlist.created_at,
-        }, status=status.HTTP_201_CREATED)
+        # Playlist mới tạo chưa có annotation từ DB, gán thủ công để serializer đọc được
+        playlist.song_count = 0
+        return created(PlaylistListSerializer(playlist).data, message='Playlist created')
 
 
 class PlaylistDetailView(APIView):
+    """
+    GET   /playlists/<pk>/  — Chi tiết playlist kèm bài hát phân trang.
+    PATCH /playlists/<pk>/  — Cập nhật title/description/image_url.
+    DELETE /playlists/<pk>/ — Xóa playlist.
+    """
     permission_classes = [IsAuthenticated]
 
     def get(self, request, pk):
-        offset = int(request.query_params.get('offset', 0))
-        limit = int(request.query_params.get('limit', 50))
+        offset, limit = parse_offset_limit(request, default_limit=50)
 
         try:
             playlist = Playlist.objects.get(id=pk, user=request.user)
         except Playlist.DoesNotExist:
-            return Response({'detail': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
+            return not_found('Playlist not found')
 
         include_total = _include_total(request)
         cache_key = (
@@ -140,39 +160,22 @@ class PlaylistDetailView(APIView):
         )
         cached = cache.get(cache_key)
         if cached:
-            return Response(cached)
+            return success(cached)
 
+        # select_related('song') để tránh N+1 query khi PlaylistSongSerializer đọc song.xxx
         song_qs = PlaylistSong.objects.filter(playlist=playlist)\
             .select_related('song')\
             .order_by('position')[offset:offset + limit]
         total_songs_qs = PlaylistSong.objects.filter(playlist=playlist)
         total_songs = _cached_count(f'playlist-songs-count:{playlist.id}', total_songs_qs) if include_total else None
 
-        songs = [
-            {
-                'id': ps.song.id,
-                'title': ps.song.title,
-                'subtitle': ps.song.subtitle,
-                'image_url': ps.song.image_url,
-                'audio_url': ps.song.audio_url,
-                'duration': ps.song.duration,
-                'source': ps.song.source,
-                'position': ps.position,
-            }
-            for ps in song_qs
-        ]
-
-        response = {
-            'id': str(playlist.id),
-            'title': playlist.title,
-            'description': playlist.description,
-            'image_url': playlist.image_url,
-            'songs': songs,
-            'song_count': total_songs,
-            'created_at': playlist.created_at,
-        }
-        cache.set(cache_key, response, timeout=60)
-        return Response(response)
+        # Truyền song_qs và song_count qua context để serializer dùng (không tự query)
+        data = PlaylistDetailSerializer(
+            playlist,
+            context={'song_qs': song_qs, 'song_count': total_songs},
+        ).data
+        cache.set(cache_key, data, timeout=60)
+        return success(data)
 
     def patch(self, request, pk):
         serializer = PlaylistUpdateSerializer(data=request.data, partial=True)
@@ -181,49 +184,48 @@ class PlaylistDetailView(APIView):
         try:
             playlist = Playlist.objects.get(id=pk, user=request.user)
         except Playlist.DoesNotExist:
-            return Response({'detail': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
+            return not_found('Playlist not found')
 
         for field in ('title', 'description', 'image_url'):
             if field in serializer.validated_data:
                 setattr(playlist, field, serializer.validated_data[field])
 
         if not any(f in serializer.validated_data for f in ('title', 'description', 'image_url')):
-            return Response({'detail': 'No fields to update'})
+            return bad_request('No fields to update')
 
         playlist.save()
-        song_count = _cached_count(f'playlist-songs-count:{playlist.id}', PlaylistSong.objects.filter(playlist=playlist))
+        # Gán song_count thủ công vì instance từ .get() không có annotation
+        playlist.song_count = _cached_count(f'playlist-songs-count:{playlist.id}', PlaylistSong.objects.filter(playlist=playlist))
         _bump_list_version(f'playlists-version:{request.user.id}')
         _bump_list_version(f'playlist-detail-version:{playlist.id}')
 
-        return Response({
-            'id': str(playlist.id),
-            'title': playlist.title,
-            'description': playlist.description,
-            'image_url': playlist.image_url,
-            'song_count': song_count,
-            'created_at': playlist.created_at,
-        })
+        return success(PlaylistListSerializer(playlist).data, message='Playlist updated')
 
     def delete(self, request, pk):
         deleted, _ = Playlist.objects.filter(id=pk, user=request.user).delete()
         if deleted == 0:
-            return Response({'detail': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
+            return not_found('Playlist not found')
+        # Xóa cache count và detail, bump cả hai version
         cache.delete(f'playlists-count:{request.user.id}')
         cache.delete(f'playlist-songs-count:{pk}')
         cache.delete(f'user-stats:{request.user.id}')
         _bump_list_version(f'playlists-version:{request.user.id}')
         _bump_list_version(f'playlist-detail-version:{pk}')
-        return Response(status=status.HTTP_204_NO_CONTENT)
+        return no_content()
 
 
 class PlaylistSongManageView(APIView):
+    """
+    POST   /playlists/<pk>/songs/           — Thêm bài hát vào playlist.
+    DELETE /playlists/<pk>/songs/<song_id>/ — Xóa bài hát khỏi playlist.
+    """
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
         try:
             playlist = Playlist.objects.get(id=pk, user=request.user)
         except Playlist.DoesNotExist:
-            return Response({'detail': 'Playlist not found'}, status=status.HTTP_404_NOT_FOUND)
+            return not_found('Playlist not found')
 
         serializer = AddSongSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -231,11 +233,13 @@ class PlaylistSongManageView(APIView):
         song_id = data['song_id']
 
         if PlaylistSong.objects.filter(playlist=playlist, song_id=song_id).exists():
-            return Response({'detail': 'Song already in playlist'})
+            return success(message='Song already in playlist')
 
+        # Lấy position cao nhất hiện tại rồi +1, đảm bảo bài mới luôn ở cuối
         max_pos = PlaylistSong.objects.filter(playlist=playlist)\
             .aggregate(max_pos=Max('position'))['max_pos'] or 0
 
+        # Upsert song vào bảng songs để đảm bảo FK hợp lệ trước khi tạo playlist_songs
         Song.objects.get_or_create(
             id=song_id,
             defaults={
@@ -257,32 +261,38 @@ class PlaylistSongManageView(APIView):
         cache.delete(f'playlist-songs-count:{pk}')
         _bump_list_version(f'playlist-detail-version:{pk}')
 
-        return Response({'detail': 'Song added to playlist', 'position': max_pos + 1}, status=status.HTTP_201_CREATED)
+        return created({'position': max_pos + 1}, message='Song added to playlist')
 
     def delete(self, request, pk, song_id):
         deleted, _ = PlaylistSong.objects.filter(
             playlist__id=pk, playlist__user=request.user, song_id=song_id,
         ).delete()
         if deleted == 0:
-            return Response({'detail': 'Song not in playlist'}, status=status.HTTP_404_NOT_FOUND)
+            return not_found('Song not in playlist')
         cache.delete(f'playlist-songs-count:{pk}')
         _bump_list_version(f'playlist-detail-version:{pk}')
-        return Response({'detail': 'Song removed from playlist'})
+        return success(message='Song removed from playlist')
 
 
 class PlaylistReorderView(APIView):
+    """
+    PATCH /playlists/<pk>/reorder/ — Đổi thứ tự bài hát trong playlist.
+    Nhận song_ids (list) theo thứ tự mới; index trong list = position mới.
+    Dùng bulk_update trong atomic transaction để tránh race condition.
+    """
     permission_classes = [IsAuthenticated]
 
     def patch(self, request, pk):
         song_ids = request.data.get('song_ids', [])
         if not isinstance(song_ids, list) or len(song_ids) < 2:
-            return Response({'detail': 'song_ids must be a list with at least 2 items'}, status=status.HTTP_400_BAD_REQUEST)
+            return bad_request('song_ids must be a list with at least 2 items')
 
         try:
             Playlist.objects.get(id=pk, user=request.user)
         except Playlist.DoesNotExist:
-            return Response({'detail': 'Playlist not found'}, status=status.HTTP_404_NOT_FOUND)
+            return not_found('Playlist not found')
 
+        # Tạo map {song_id: new_position} từ thứ tự trong list gửi lên
         position_by_song = {song_id: idx for idx, song_id in enumerate(song_ids)}
         with transaction.atomic():
             playlist_songs = list(PlaylistSong.objects.filter(playlist_id=pk, song_id__in=song_ids))
@@ -291,4 +301,4 @@ class PlaylistReorderView(APIView):
             PlaylistSong.objects.bulk_update(playlist_songs, ['position'])
         _bump_list_version(f'playlist-detail-version:{pk}')
 
-        return Response({'detail': 'Playlist reordered', 'song_ids': song_ids})
+        return success({'song_ids': song_ids}, message='Playlist reordered')
