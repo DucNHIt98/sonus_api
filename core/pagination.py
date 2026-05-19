@@ -22,14 +22,14 @@ Dùng trong response:
 """
 
 import math
-from typing import Any
+from typing import Any, Optional
 
 
 def paginate(
     items: list[Any],
     offset: int,
     limit: int,
-    total: int | None = None,
+    total: Optional[int] = None,
 ) -> dict:
     """
     Gói danh sách items đã slice vào schema phân trang chuẩn.

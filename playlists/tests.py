@@ -6,22 +6,28 @@ from accounts.models import User
 from playlists.models import Playlist, PlaylistSong
 from music.models import Song
 
+from conftest import success_data, pagination, items
+
+
+_data = success_data
+_pagination = pagination
+_items = items
+
 
 class TestPlaylistListView:
     def test_list_playlists(self, auth_client, playlist):
         url = reverse('playlists-list')
         response = auth_client.get(url)
         assert response.status_code == 200
-        result = response.json()
-        assert result['total'] == 1
-        assert len(result['playlists']) == 1
-        assert result['playlists'][0]['title'] == 'Test Playlist'
+        assert _pagination(response)['total'] == 1
+        assert len(_items(response)) == 1
+        assert _items(response)[0]['title'] == 'Test Playlist'
 
     def test_list_empty(self, auth_client):
         url = reverse('playlists-list')
         response = auth_client.get(url)
         assert response.status_code == 200
-        assert response.json()['total'] == 0
+        assert _pagination(response)['total'] == 0
 
     def test_list_other_user_isolated(self, auth_client, user):
         other = Playlist.objects.create(
@@ -29,7 +35,7 @@ class TestPlaylistListView:
         )
         url = reverse('playlists-list')
         response = auth_client.get(url)
-        assert response.json()['total'] == 1  # only the one from auth_client's user
+        assert _pagination(response)['total'] == 1  # only the one from auth_client's user
 
     def test_create_playlist(self, auth_client):
         url = reverse('playlists-list')
@@ -38,7 +44,7 @@ class TestPlaylistListView:
             'description': 'A new one',
         }, format='json')
         assert response.status_code == 201
-        result = response.json()
+        result = _data(response)
         assert result['title'] == 'New Playlist'
         assert Playlist.objects.filter(title='New Playlist').exists()
 
@@ -50,7 +56,7 @@ class TestPlaylistListView:
         url = reverse('playlists-list')
         response = auth_client.post(url, {'title': 'Over Limit'}, format='json')
         assert response.status_code == 403
-        assert 'limit' in response.json()['detail'].lower()
+        assert 'limit' in response.json()['message'].lower()
 
     def test_create_playlist_premium_unlimited(self, auth_premium_client, user):
         from core.permissions import FREE_PLAYLIST_LIMIT
@@ -76,7 +82,7 @@ class TestPlaylistDetailView:
         url = reverse('playlists-detail', args=[str(playlist.id)])
         response = auth_client.get(url)
         assert response.status_code == 200
-        result = response.json()
+        result = _data(response)
         assert result['title'] == 'Test Playlist'
         assert result['song_count'] == 1
         assert len(result['songs']) == 1
@@ -105,8 +111,8 @@ class TestPlaylistDetailView:
     def test_update_playlist_no_fields(self, auth_client, playlist):
         url = reverse('playlists-detail', args=[str(playlist.id)])
         response = auth_client.patch(url, {}, format='json')
-        assert response.status_code == 200
-        assert response.json()['detail'] == 'No fields to update'
+        assert response.status_code == 400
+        assert response.json()['message'] == 'No fields to update'
 
     def test_delete_playlist(self, auth_client, playlist):
         url = reverse('playlists-detail', args=[str(playlist.id)])
@@ -135,7 +141,7 @@ class TestPlaylistSongManageView:
         url = reverse('playlists-add-song', args=[str(playlist.id)])
         response = auth_client.post(url, {'song_id': 'test_song_1'}, format='json')
         assert response.status_code == 200
-        assert response.json()['detail'] == 'Song already in playlist'
+        assert response.json()['message'] == 'Song already in playlist'
 
     def test_add_song_nonexistent_playlist(self, auth_client, song):
         url = reverse('playlists-add-song', args=['00000000-0000-0000-0000-000000000000'])
@@ -151,7 +157,7 @@ class TestPlaylistSongManageView:
         url = reverse('playlists-add-song', args=[str(playlist.id)])
         response = auth_client.post(url, {'song_id': 'second_song'}, format='json')
         assert response.status_code == 201
-        assert response.json()['position'] == 1
+        assert _data(response)['position'] == 1
 
     def test_remove_song(self, auth_client, playlist, song):
         PlaylistSong.objects.create(

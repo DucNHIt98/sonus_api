@@ -6,6 +6,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from payments.models import Subscription
+from conftest import success_data
 
 
 class TestCreateCheckoutView:
@@ -21,7 +22,7 @@ class TestCreateCheckoutView:
             'cancel_url': 'https://example.com/cancel',
         }, format='json')
         assert response.status_code == 200
-        assert 'url' in response.json()
+        assert 'url' in success_data(response)
         mock_checkout.assert_called_once()
 
     def test_create_checkout_unauthorized(self, api_client):
@@ -49,7 +50,7 @@ class TestSubscriptionStatusView:
         url = reverse('subscription-status')
         response = auth_client.get(url)
         assert response.status_code == 200
-        result = response.json()
+        result = success_data(response)
         assert result['is_premium'] is False
         assert result['status'] is None
 
@@ -57,7 +58,7 @@ class TestSubscriptionStatusView:
         url = reverse('subscription-status')
         response = auth_client.get(url)
         assert response.status_code == 200
-        result = response.json()
+        result = success_data(response)
         assert result['is_premium'] is True
         assert result['status'] == 'active'
 
@@ -71,7 +72,7 @@ class TestSubscriptionStatusView:
         )
         url = reverse('subscription-status')
         response = auth_client.get(url)
-        assert response.json()['is_premium'] is False
+        assert success_data(response)['is_premium'] is False
 
 
 class TestCancelSubscriptionView:
@@ -88,7 +89,7 @@ class TestCancelSubscriptionView:
         url = reverse('cancel-subscription')
         response = auth_client.post(url)
         assert response.status_code == 200
-        assert response.json()['status'] == 'error'
+        assert success_data(response)['status'] == 'error'
 
 
 class TestStripeWebhookView:
@@ -103,7 +104,7 @@ class TestStripeWebhookView:
             HTTP_STRIPE_SIGNATURE='test_sig',
         )
         assert response.status_code == 200
-        assert response.json()['status'] == 'success'
+        assert success_data(response)['status'] == 'success'
 
     @patch('payments.views.handle_webhook')
     def test_webhook_service_error(self, mock_handle, api_client):

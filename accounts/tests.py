@@ -4,6 +4,7 @@ import pytest
 from django.urls import reverse
 
 from accounts.models import User, UserCredential, UserSession
+from conftest import success_data, pagination, items
 
 
 class TestRegisterView:
@@ -16,7 +17,7 @@ class TestRegisterView:
         }
         response = api_client.post(url, data, format='json')
         assert response.status_code == 201
-        result = response.json()
+        result = success_data(response)
         assert result['user']['email'] == 'newuser@example.com'
         assert result['user']['username'] == 'newuser'
         assert 'token' in result
@@ -30,7 +31,8 @@ class TestRegisterView:
             'password': 'Password123!',
         }
         response = api_client.post(url, data, format='json')
-        assert response.status_code == 400
+        assert response.status_code == 422
+
 
     def test_register_weak_password(self, api_client, db):
         url = reverse('auth-register')
@@ -40,7 +42,8 @@ class TestRegisterView:
             'password': '123',
         }
         response = api_client.post(url, data, format='json')
-        assert response.status_code == 400
+        assert response.status_code == 422
+
 
     def test_register_with_display_name(self, api_client, db):
         url = reverse('auth-register')
@@ -68,7 +71,7 @@ class TestLoginView:
             'password': 'CorrectPassword1!',
         }, format='json')
         assert response.status_code == 200
-        result = response.json()
+        result = success_data(response)
         assert result['user']['email'] == 'test@example.com'
         assert 'token' in result
 
@@ -82,7 +85,7 @@ class TestLoginView:
             'email': 'test@example.com',
             'password': 'WrongPassword',
         }, format='json')
-        assert response.status_code == 400
+        assert response.status_code == 422
 
     def test_login_nonexistent_email(self, api_client, db):
         url = reverse('auth-login')
@@ -90,7 +93,7 @@ class TestLoginView:
             'email': 'nobody@example.com',
             'password': 'SomePassword1!',
         }, format='json')
-        assert response.status_code == 400
+        assert response.status_code == 422
 
 
 class TestLogoutView:
@@ -110,7 +113,7 @@ class TestCurrentUserView:
         url = reverse('auth-me')
         response = auth_client.get(url)
         assert response.status_code == 200
-        result = response.json()
+        result = success_data(response)
         assert result['email'] == 'test@example.com'
         assert result['username'] == 'testuser'
         assert 'is_premium' in result
@@ -125,7 +128,7 @@ class TestCurrentUserView:
         url = reverse('auth-me')
         response = auth_client.patch(url, {'display_name': 'Updated Name'}, format='json')
         assert response.status_code == 200
-        result = response.json()
+        result = success_data(response)
         assert result['display_name'] == 'Updated Name'
 
 
@@ -155,7 +158,7 @@ class TestSupabaseExchangeView:
         url = reverse('auth-google')
         response = api_client.post(url, {'token': 'valid_supabase_token'}, format='json')
         assert response.status_code == 200
-        result = response.json()
+        result = success_data(response)
         assert result['user']['email'] == 'google@example.com'
         assert 'token' in result
         assert User.objects.filter(email='google@example.com').exists()
@@ -163,4 +166,4 @@ class TestSupabaseExchangeView:
     def test_google_exchange_no_token(self, api_client):
         url = reverse('auth-google')
         response = api_client.post(url, {}, format='json')
-        assert response.status_code == 400
+        assert response.status_code == 422

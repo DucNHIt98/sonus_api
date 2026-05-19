@@ -4,6 +4,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from threading import Thread
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +139,7 @@ def _playable_results(qs, limit: int) -> list[dict]:
     return results
 
 
-def _dedupe_results(results: list[dict], limit: int | None = None) -> list[dict]:
+def _dedupe_results(results: list[dict], limit: Optional[int] = None) -> list[dict]:
     """
     Loại bỏ trùng lặp từ nhiều nguồn kết hợp.
     Key dedup: id nếu có, hoặc (normalized_title, normalized_subtitle).

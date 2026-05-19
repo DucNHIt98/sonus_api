@@ -5,6 +5,16 @@ from django.conf import settings
 from django.db import connection
 from django.utils import timezone
 
+
+def success_data(response):
+    return response.json()['data']
+
+def pagination(response):
+    return response.json()['data']['pagination']
+
+def items(response):
+    return response.json()['data']['items']
+
 from accounts.models import User, UserSession
 from music.models import DownloadedSong, LikedSong, Lyric, PlayHistory, Song
 from payments.models import Subscription

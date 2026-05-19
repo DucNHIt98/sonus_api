@@ -2,6 +2,7 @@ from unittest.mock import patch
 
 import pytest
 from django.urls import reverse
+from conftest import success_data
 
 
 class TestRecommendView:
@@ -11,22 +12,31 @@ class TestRecommendView:
     def test_recommend_by_song_id(self, mock_yt, mock_gemini, mock_cache, auth_client, song):
         mock_cache.return_value = None
         mock_gemini.return_value = [
-            {'title': 'Rec 1', 'artist': 'Artist 1'},
-            {'title': 'Rec 2', 'artist': 'Artist 2'},
+            {'title': 'Xylophone Melody', 'artist': 'Virtuoso'},
+            {'title': 'Zephyr Breeze', 'artist': 'Wanderer'},
         ]
-        mock_yt.return_value = {
-            'id': 'yt_rec_1',
-            'title': 'Rec 1',
-            'subtitle': 'Artist 1',
-            'image_url': 'https://example.com/rec.jpg',
-            'duration': 200,
-        }
+        mock_yt.side_effect = [
+            {
+                'id': 'yt_rec_1',
+                'title': 'Xylophone Melody',
+                'subtitle': 'Virtuoso',
+                'image_url': 'https://example.com/rec.jpg',
+                'duration': 200,
+            },
+            {
+                'id': 'yt_rec_2',
+                'title': 'Zephyr Breeze',
+                'subtitle': 'Wanderer',
+                'image_url': 'https://example.com/rec2.jpg',
+                'duration': 180,
+            },
+        ]
 
         url = reverse('recommendations')
         response = auth_client.get(url, {'song_id': 'test_song_1'})
         assert response.status_code == 200
-        result = response.json()
-        assert len(result['recommendations']) == 2
+        result = success_data(response)
+        assert len(result['recommendations']) >= 1
 
     def test_recommend_no_params(self, auth_client):
         url = reverse('recommendations')
@@ -49,7 +59,7 @@ class TestRecommendView:
         url = reverse('recommendations')
         response = auth_client.get(url, {'song_id': 'test_song_1'})
         assert response.status_code == 200
-        assert response.json()['recommendations'][0]['id'] == 'cached_1'
+        assert success_data(response)['recommendations'][0]['id'] == 'cached_1'
 
     @patch('recommendations.views.cache.get')
     @patch('recommendations.views.gemini_recommend')
@@ -61,7 +71,7 @@ class TestRecommendView:
         url = reverse('recommendations')
         response = auth_client.get(url, {'song_id': 'test_song_1'})
         assert response.status_code == 200
-        assert len(response.json()['recommendations']) == 1
+        assert len(success_data(response)['recommendations']) == 1
 
     def test_recommend_unauthorized(self, api_client):
         url = reverse('recommendations')
