@@ -1,6 +1,6 @@
 from django.core.management.base import BaseCommand, CommandError
 
-from services.crawler import crawl_queries
+from services.crawler import crawl_queries, crawl_youtube_channel
 
 PRESET_QUERIES = {
     'v-pop': [
@@ -130,15 +130,24 @@ class Command(BaseCommand):
             help='Source to search (default: youtube)',
         )
         parser.add_argument('--limit', type=int, default=10, help='Results per query')
+        parser.add_argument('--channel', help='Crawl all videos from a YouTube channel URL')
 
     def handle(self, *args, **options):
+        if options['channel']:
+            self.stdout.write(f'Crawling YouTube channel: {options["channel"]}')
+            result = crawl_youtube_channel(options['channel'], options['limit'])
+            self.stdout.write(self.style.SUCCESS(
+                f'Done: {result.get("saved", 0)} new, {result.get("exists", 0)} existed, '
+                f'{result.get("errors", 0)} errors'
+            ))
+            return
         if options['preset']:
             queries = PRESET_QUERIES[options['preset']]
             self.stdout.write(f'Crawling preset: {options["preset"]} ({len(queries)} queries)')
         elif options['query']:
             queries = [{'source': options['source'], 'query': options['query'], 'limit': options['limit']}]
         else:
-            raise CommandError('Provide --preset or --query')
+            raise CommandError('Provide --preset, --query, or --channel')
 
         results = crawl_queries(queries)
 

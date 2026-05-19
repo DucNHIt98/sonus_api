@@ -39,6 +39,22 @@ def _save_songs(results: list, source: str) -> dict:
     return {'saved': saved, 'exists': exists, 'errors': errors}
 
 
+def crawl_youtube_channel(channel_url: str, limit: int = 50) -> dict:
+    try:
+        from services.youtube import crawl_channel
+        results = crawl_channel(channel_url, limit)
+        if not results:
+            return {'saved': 0, 'exists': 0, 'errors': 0, 'source': 'youtube_channel', 'channel': channel_url}
+        return {
+            **_save_songs(results, 'youtube'),
+            'source': 'youtube_channel',
+            'channel': channel_url,
+        }
+    except YouTubeError as e:
+        logger.error('YouTube channel crawl failed: %s', e)
+        return {'saved': 0, 'exists': 0, 'errors': 1, 'source': 'youtube_channel', 'channel': channel_url, 'error': str(e)}
+
+
 def crawl_youtube(query: str, limit: int = 10) -> dict:
     try:
         results = search_youtube(query, limit)

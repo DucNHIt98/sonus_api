@@ -163,6 +163,56 @@ def search_suggestions(query: str, limit: int = 10) -> list:
     return search_youtube(query, limit)
 
 
+def crawl_channel(channel_url: str, limit: int = 50) -> list:
+    """
+    Crawl danh sách video từ YouTube channel bằng yt-dlp.
+    Chỉ lấy video có duration >= 120s (2 phút) và không phải teaser/trailer/shorts.
+    """
+    cache_key = _ck(f'yt_channel:{channel_url}:{limit}')
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
+
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'extract_flat': 'in_playlist',
+        'force_generic_extractor': False,
+    }
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(channel_url, download=False)
+    except Exception as e:
+        raise YouTubeError(f'Channel crawl failed: {e}') from e
+
+    _TEASER_KEYWORDS = {'teaser', 'trailer', '#shorts', 'short', 'promo', 'highlight'}
+
+    results = []
+    for entry in info.get('entries', []):
+        if not entry or not entry.get('id'):
+            continue
+        if len(results) >= limit:
+            break
+        title = (entry.get('title') or '').lower()
+        duration = entry.get('duration')
+        if any(kw in title for kw in _TEASER_KEYWORDS):
+            continue
+        if duration is not None and duration < 120:
+            continue
+        results.append({
+            'id': entry['id'],
+            'title': entry.get('title', ''),
+            'subtitle': entry.get('channel', '') or entry.get('uploader', ''),
+            'image_url': entry.get('thumbnail', ''),
+            'duration': duration,
+            'source': 'youtube',
+            'audio_url': None,
+        })
+
+    cache.set(cache_key, results, timeout=YT_SEARCH_CACHE_TTL)
+    return results
+
+
 def _extract_video_info(video_id: str) -> dict:
     ydl_opts = {
         'quiet': True,
