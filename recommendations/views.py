@@ -45,9 +45,10 @@ def _db_search(query: str, limit: int) -> list[dict]:
         query_filter |= Q(title__icontains=term) | Q(subtitle__icontains=term) | Q(album_name__icontains=term)
     if not query_filter:
         query_filter = Q(title__icontains=query) | Q(subtitle__icontains=query) | Q(album_name__icontains=query)
+    duration_filter = Q(duration__gte=180, duration__lte=420)
     return [
         _song_to_result(song)
-        for song in Song.objects.filter(query_filter).order_by('-created_at')[:limit]
+        for song in Song.objects.filter(query_filter & duration_filter).order_by('-created_at')[:limit]
     ]
 
 

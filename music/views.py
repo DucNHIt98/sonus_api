@@ -105,11 +105,14 @@ def _song_to_search_result(song: Song) -> dict:
 def _is_playable_song(song: Song) -> bool:
     """
     Lọc bỏ bài hát không thực sự phát được để không hiển thị trong kết quả.
+    - Chỉ hiển thị bài hát có độ dài từ 3-7 phút (180-420 giây)
     - source='db'/'test' hoặc audio_url chứa 'example.com': dữ liệu test/fake
     - source='youtube': cần YouTube video ID hợp lệ (11 ký tự)
     - source='search_cache': chấp nhận nếu có audio_url hoặc YouTube ID hợp lệ
     - source='jamendo'/'nct'/'deezer_preview': luôn có thể phát (có audio_url thật)
     """
+    if song.duration is None or song.duration < 180 or song.duration > 420:
+        return False
     source = (song.source or '').lower()
     audio_url = song.audio_url or ''
     if source in {'db', 'test'} or 'example.com' in audio_url:
@@ -172,12 +175,14 @@ def _db_search_results(query: str, limit: int) -> list[dict]:
         | Q(subtitle__icontains=query)
         | Q(album_name__icontains=query)
     )
-    return _playable_results(Song.objects.filter(query_filter).order_by('-created_at'), limit)
+    duration_filter = Q(duration__gte=180, duration__lte=420)
+    return _playable_results(Song.objects.filter(query_filter & duration_filter).order_by('-created_at'), limit)
 
 
 def _db_genre_results(genre: str, limit: int) -> list[dict]:
     """Lấy bài hát theo thể loại từ DB (tìm chính xác theo genre, không phân biệt hoa thường)."""
-    return _playable_results(Song.objects.filter(genre__iexact=genre).order_by('-created_at'), limit)
+    duration_filter = Q(duration__gte=180, duration__lte=420)
+    return _playable_results(Song.objects.filter(genre__iexact=genre, duration__gte=180, duration__lte=420).order_by('-created_at'), limit)
 
 
 def _db_region_results(region: str, limit: int) -> list[dict]:
@@ -187,12 +192,14 @@ def _db_region_results(region: str, limit: int) -> list[dict]:
     vì một số bài hát lưu region dưới dạng genre.
     """
     normalized = region.replace('-', ' ')
+    duration_filter = Q(duration__gte=180, duration__lte=420)
     return _playable_results(
         Song.objects.filter(
-            Q(region__iexact=region)
+            (Q(region__iexact=region)
             | Q(region__iexact=normalized)
             | Q(genre__iexact=region)
-            | Q(genre__iexact=normalized)
+            | Q(genre__iexact=normalized))
+            & duration_filter
         ).order_by('-created_at'),
         limit,
     )
@@ -200,7 +207,7 @@ def _db_region_results(region: str, limit: int) -> list[dict]:
 
 def _db_recent_results(limit: int) -> list[dict]:
     """Lấy bài hát mới nhất trong DB (dùng cho Trending section)."""
-    return _playable_results(Song.objects.order_by('-created_at'), limit)
+    return _playable_results(Song.objects.filter(duration__gte=180, duration__lte=420).order_by('-created_at'), limit)
 
 
 def _db_genres_map(genres: list[str], per_limit: int) -> dict[str, list[dict]]:
@@ -210,7 +217,7 @@ def _db_genres_map(genres: list[str], per_limit: int) -> dict[str, list[dict]]:
     """
     wanted = {genre.lower(): genre for genre in genres}
     grouped = {genre: [] for genre in genres}
-    for song in Song.objects.filter(genre__isnull=False).order_by('-created_at')[:300]:
+    for song in Song.objects.filter(genre__isnull=False, duration__gte=180, duration__lte=420).order_by('-created_at')[:300]:
         if not _is_playable_song(song):
             continue
         key = (song.genre or '').lower()
