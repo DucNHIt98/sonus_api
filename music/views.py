@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import re
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from threading import Thread
@@ -70,6 +71,68 @@ def _is_premium_cached(user_id: str) -> bool:
 def _normalize(s):
     """Chuẩn hóa chuỗi để so sánh dedup: bỏ ký tự đặc biệt, lowercase."""
     return re.sub(r'[^a-z0-9]', '', s.lower().strip()) if s else ''
+
+
+_WEAK_SEARCH_TERMS = {
+    'nhac',
+    'music',
+    'song',
+    'bai',
+    'baihat',
+    'playlist',
+    'remix',
+    'official',
+    'audio',
+    'video',
+}
+
+
+def _strip_accents(value: str) -> str:
+    normalized = unicodedata.normalize('NFKD', value or '')
+    return ''.join(ch for ch in normalized if not unicodedata.combining(ch))
+
+
+def _search_tokens(value: str) -> list[str]:
+    plain = _strip_accents(value).lower()
+    return [token for token in re.split(r'[^a-z0-9]+', plain) if len(token) >= 2]
+
+
+def _search_blob(*values: str) -> str:
+    return ' '.join(_search_tokens(' '.join(value or '' for value in values)))
+
+
+def _db_result_score(result: dict, query: str) -> int:
+    query_tokens = _search_tokens(query)
+    strong_tokens = [token for token in query_tokens if token not in _WEAK_SEARCH_TERMS]
+    blob = _search_blob(result.get('title', ''), result.get('subtitle', ''), result.get('album_name', ''))
+    title_blob = _search_blob(result.get('title', ''))
+    phrase = ' '.join(query_tokens)
+
+    score = 0
+    if phrase and phrase in blob:
+        score += 40
+
+    matched_strong = 0
+    for token in strong_tokens:
+        if token in title_blob:
+            score += 12
+            matched_strong += 1
+        elif token in blob:
+            score += 6
+            matched_strong += 1
+
+    for token in query_tokens:
+        if token in _WEAK_SEARCH_TERMS:
+            continue
+        if token in blob:
+            score += 2
+
+    if len(strong_tokens) >= 2 and matched_strong < 2:
+        return 0
+    if strong_tokens and matched_strong == 0:
+        return 0
+
+    return score
 
 
 # Regex kiểm tra YouTube video ID hợp lệ (11 ký tự alphanumeric + _ -)
@@ -176,7 +239,11 @@ def _db_search_results(query: str, limit: int) -> list[dict]:
         | Q(album_name__icontains=query)
     )
     duration_filter = Q(duration__gte=180, duration__lte=420)
-    return _playable_results(Song.objects.filter(query_filter & duration_filter).order_by('-created_at'), limit)
+    candidates = _playable_results(Song.objects.filter(query_filter & duration_filter).order_by('-created_at'), max(limit * 4, 20))
+    ranked = [(_db_result_score(result, query), result) for result in candidates]
+    ranked = [(score, result) for score, result in ranked if score > 0]
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return [result for _, result in ranked[:limit]]
 
 
 def _db_genre_results(genre: str, limit: int) -> list[dict]:
@@ -376,7 +443,7 @@ class SearchView(APIView):
         sources = params['sources'].split(',')
         premium = _is_premium_cached(str(request.user.id))
         # Cache key bao gồm premium status vì Free và Premium nhận số kết quả khác nhau
-        cache_key = _cache_key('search:v5', query.strip().lower(), limit, params['sources'], premium)
+        cache_key = _cache_key('search:v6', query.strip().lower(), limit, params['sources'], premium)
         cached = cache.get(cache_key)
         if cached:
             return success(cached)
